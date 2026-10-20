@@ -1099,7 +1099,7 @@ fn image_ui(ui: &mut Ui, item: &mut Item, sr: Rect, clip: Rect, ed: &mut Editor,
         Tex::Loading => (None, [4, 3]),
         Tex::Failed => (None, [4, 3]),
     };
-    let aspect = (crop.height() * size[1] as f32) / (crop.width() * size[0] as f32).max(1e-3);
+    let aspect = (crop.height() * size[1] as f32) / (crop.width() * size[0] as f32).max(1e-3) * img.stretch_k();
     let h = width * aspect * z;
     let ir = Rect::from_min_size(sr.min, vec2(sr.width(), h));
     let cropping = ed.crop == Some(item_id) && interactive;

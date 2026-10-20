@@ -570,6 +570,8 @@ pub struct Env<'a> {
 /// Requests from the canvas to the application.
 #[derive(Clone, Debug)]
 pub enum Action {
+    /// Paste from the clipboard at a point of the page (canvas coordinates).
+    PasteAt(Pos2),
     OpenLink(String),
     Status(String),
     OcrImage(Id),
@@ -1032,7 +1034,7 @@ pub fn show(ui: &mut egui::Ui, page: &mut Page, ed: &mut Editor, env: &mut Env) 
             let pts: Vec<Pos2> = [a, pos2(b.x, a.y), b, pos2(a.x, b.y), a].iter().map(|p| view.apply(*p)).collect();
             painter.add(Shape::dashed_line(&pts, EStroke::new(1.2, Color32::from_rgb(60, 130, 255)), 5.0, 3.0));
         }
-        cursor_preview(&painter, ed, &ctx, rect, is_mouse, hovered, pan_mode);
+        cursor_preview(&painter, ed, &ctx, rect, is_mouse, hovered, pan_mode, env.dark);
         if env.settings.minimap && !ed.rotated() {
             minimap(ui, page, ed, rect);
         }
@@ -2096,14 +2098,32 @@ fn draw_tool_overlays(painter: &egui::Painter, ed: &Editor, view: &Affine, ctx: 
     }
 }
 
-fn cursor_preview(painter: &egui::Painter, ed: &Editor, ctx: &egui::Context, rect: Rect, is_mouse: bool, hovered: bool, pan_mode: bool) {
+/// Brush tip under the pointer: a dot as wide as the stroke, in the brush colour,
+/// with a thin contrasting rim so it shows on any background.
+fn brush_dot(painter: &egui::Painter, ed: &Editor, p: Pos2, dark: bool) {
+    let drawing = ed.tool == Tool::Draw;
+    let (r, fill) = if drawing {
+        let c = crate::brush::display_color(ed.pen.color, dark);
+        let a = if ed.pen.kind == InkKind::Highlighter { 110 } else { 230 };
+        ((ed.pen.width * 0.5 * ed.zoom).clamp(1.5, 80.0), Color32::from_rgba_unmultiplied(c[0], c[1], c[2], a))
+    } else {
+        (2.0, if dark { Color32::from_gray(235) } else { Color32::from_gray(30) })
+    };
+    let rim = if dark { Color32::from_black_alpha(150) } else { Color32::from_white_alpha(190) };
+    painter.circle_stroke(p, r + 0.75, EStroke::new(1.5, rim));
+    painter.circle_filled(p, r, fill);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cursor_preview(painter: &egui::Painter, ed: &Editor, ctx: &egui::Context, rect: Rect, is_mouse: bool, hovered: bool, pan_mode: bool, dark: bool) {
+    let dot_tool = ed.tool.is_ink() && !matches!(ed.tool, Tool::Eraser | Tool::Laser | Tool::Eyedropper | Tool::Fill);
+    // Pen hovering over the tablet.
     if let Some((p, eraser)) = ed.hover {
         if rect.contains(p) && ed.live.is_none() {
             if eraser || ed.tool == Tool::Eraser {
                 painter.circle_stroke(p, ed.eraser_radius, EStroke::new(1.0, Color32::from_gray(120)));
-            } else if ed.tool == Tool::Draw {
-                let r = (ed.pen.width * 0.5 * ed.zoom).max(1.5);
-                painter.circle_stroke(p, r, EStroke::new(1.0, color32(ed.pen.color)));
+            } else if dot_tool {
+                brush_dot(painter, ed, p, dark);
             } else if ed.tool == Tool::Laser {
                 painter.circle_filled(p, 4.0, Color32::from_rgb(255, 40, 40));
             }
@@ -2127,8 +2147,16 @@ fn cursor_preview(painter: &egui::Painter, ed: &Editor, ctx: &egui::Context, rec
             }
         } else if matches!(ed.tool, Tool::Eyedropper | Tool::Fill) {
             ctx.set_cursor_icon(CursorIcon::Cell);
-        } else if ed.tool.is_ink() {
-            ctx.set_cursor_icon(CursorIcon::Crosshair);
+        } else if dot_tool {
+            // No system crosshair: the dot is the cursor (also while drawing with the mouse).
+            ctx.set_cursor_icon(CursorIcon::None);
+            if is_mouse {
+                if let Some(p) = ctx.pointer_hover_pos() {
+                    brush_dot(painter, ed, p, dark);
+                }
+            }
+        } else if ed.tool == Tool::Eraser {
+            ctx.set_cursor_icon(CursorIcon::None);
         }
     }
 }
@@ -2214,7 +2242,7 @@ fn static_item(painter: &egui::Painter, it: &Item, view: &Affine, angle: f32, en
             let path = env.nb.asset_path(&img.asset);
             if let crate::textures::Tex::Ready(h, size) = env.textures.get(path, img.rotation, img.flip_h, img.flip_v) {
                 let crop = Rect::from_min_max(pos2(img.crop[0], img.crop[1]), pos2(img.crop[2], img.crop[3]));
-                let aspect = (crop.height() * size[1] as f32) / (crop.width() * size[0] as f32).max(1e-3);
+                let aspect = (crop.height() * size[1] as f32) / (crop.width() * size[0] as f32).max(1e-3) * img.stretch_k();
                 let r = Rect::from_min_size(it.pos2(), vec2(it.width, it.width * aspect));
                 let mut m = Mesh::with_texture(h.id());
                 for (c, uv) in [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom()].iter().zip([crop.left_top(), crop.right_top(), crop.right_bottom(), crop.left_bottom()]) {
@@ -2359,12 +2387,12 @@ fn guides_ui(ui: &mut egui::Ui, page: &mut Page, ed: &mut Editor, rect: Rect, vi
 
 fn canvas_menu(ui: &mut egui::Ui, page: &mut Page, ed: &mut Editor, env: &mut Env, rect: Rect, changed: &mut bool) {
     let at = ui.ctx().pointer_interact_pos().map(|p| ed.to_canvas(rect, p));
-    if ui.button("Вставить").clicked() {
-        if !env.clip.items.is_empty() || !env.clip.strokes.is_empty() {
-            let clip = env.clip.clone();
-            ed.paste(page, &clip, at);
-            *changed = true;
+    if ui.button("Вставить   Ctrl+V").clicked() {
+        // The app decides between a picture, text and our own copied blocks.
+        if let Some(p) = at {
+            env.actions.push(Action::PasteAt(p));
         }
+        let _ = (&page, &changed);
         ui.close();
     }
     if ui.button("Выделить всё   Ctrl+A").clicked() {
@@ -2579,11 +2607,19 @@ pub fn apply_xform(page: &mut Page, ed: &Editor, x: &Xform) {
         let old = it.pos2();
         let np = x.apply(old);
         let k = x.scale.x.abs();
+        let ky = x.scale.y.abs();
         it.pos = [np.x, np.y];
         if k != 1.0 {
             it.width *= k;
             if let ItemKind::Text(t) = &mut it.kind {
                 t.size = (t.size * k).clamp(4.0, 200.0);
+            }
+        }
+        // Pictures follow both axes, so a corner drag can stretch them freely.
+        if let ItemKind::Image(img) = &mut it.kind {
+            if (ky - k).abs() > 1e-4 && k > 1e-3 {
+                img.stretch = (img.stretch_k() * ky / k).clamp(0.05, 20.0);
+                it.height *= ky;
             }
         }
         moved.push((it.id, np - old));
@@ -2695,3 +2731,28 @@ pub fn export_region(page: &Page) -> Rect {
 }
 
 pub type Highlights = HashMap<Id, Vec<(usize, usize)>>;
+
+#[cfg(test)]
+mod xform_tests {
+    use super::*;
+
+    #[test]
+    fn corner_drag_stretches_pictures() {
+        let mut page = Page::new(new_id());
+        let it = Item::new(pos2(10.0, 10.0), 200.0, ItemKind::Image(ImageItem { asset: "a.png".into(), crop: full_crop(), ..Default::default() }), "a");
+        let id = it.id;
+        page.items.push(it);
+        let mut ed = Editor::new(page.id);
+        ed.selection.items = vec![id];
+        // Twice as tall, same width: only the vertical stretch changes.
+        apply_xform(&mut page, &ed, &Xform { pivot: pos2(10.0, 10.0), scale: vec2(1.0, 2.0), ..Default::default() });
+        let ItemKind::Image(img) = &page.items[0].kind else { panic!() };
+        assert!((img.stretch_k() - 2.0).abs() < 1e-4);
+        assert_eq!(page.items[0].width, 200.0);
+        // Uniform scaling keeps the stretch.
+        apply_xform(&mut page, &ed, &Xform { pivot: pos2(10.0, 10.0), scale: vec2(0.5, 0.5), ..Default::default() });
+        let ItemKind::Image(img) = &page.items[0].kind else { panic!() };
+        assert!((img.stretch_k() - 2.0).abs() < 1e-4);
+        assert_eq!(page.items[0].width, 100.0);
+    }
+}

@@ -888,10 +888,19 @@ impl App {
             if y == 0.0 {
                 y = base.y;
             }
+            let mut ids = Vec::new();
             for (kind, w, h) in new_items {
-                let it = Item::new(egui::pos2(x0.unwrap_or(base.x), y), w, kind, &author);
+                let mut it = Item::new(egui::pos2(x0.unwrap_or(base.x), y), w, kind, &author);
+                it.height = h;
                 y += h + 20.0;
+                ids.push(it.id);
                 page.items.push(it);
+            }
+            // Selected right away: drag to move, corners to resize or stretch.
+            if !ids.is_empty() {
+                ed.editing = None;
+                ed.tool = Tool::Select;
+                ed.selection = crate::canvas::Selection { strokes: Vec::new(), items: ids };
             }
         });
         self.mark_dirty(pid);
@@ -899,6 +908,7 @@ impl App {
 
     pub fn handle_action(&mut self, ctx: &Context, a: Action) {
         match a {
+            Action::PasteAt(p) => self.paste_at(ctx, None, Some(p)),
             Action::OpenLink(url) => self.open_link(&url),
             Action::Status(s) if s == "underlay" => self.pick_underlay(),
             Action::Status(s) => self.set_status(s),
@@ -1792,6 +1802,12 @@ impl App {
     }
 
     pub fn paste_on_canvas(&mut self, ctx: &Context, text: Option<String>) {
+        self.paste_at(ctx, text, None);
+    }
+
+    /// Pastes the clipboard; `at` is a point of the page (top-left of what is pasted).
+    /// Pictures arrive selected, ready to be moved and resized.
+    pub fn paste_at(&mut self, ctx: &Context, text: Option<String>, at: Option<egui::Pos2>) {
         let Some(pid) = self.cur_page else { return };
         if self.locked_by.is_some() {
             return;
@@ -1800,9 +1816,12 @@ impl App {
         let ours = !self.clip.items.is_empty() || !self.clip.strokes.is_empty();
         let sys_text = text.clone().or_else(|| arboard::Clipboard::new().ok().and_then(|mut c| c.get_text().ok()));
         let clip_text: String = self.clip.items.iter().map(|i| i.plain_text()).collect::<Vec<_>>().join("\n");
-        if ours && sys_text.as_deref().is_none_or(|t| t == clip_text || t == " ") {
+        // A picture copied in another program is newer than our blocks unless we copied pictures ourselves.
+        let ours_has_image = self.clip.items.iter().any(|i| matches!(i.kind, ItemKind::Image(_)));
+        let sys_image = text.is_none() && !ours_has_image && arboard::Clipboard::new().ok().is_some_and(|mut c| c.get_image().is_ok());
+        if ours && !sys_image && sys_text.as_deref().is_none_or(|t| t == clip_text || t == " ") {
             let clip = self.clip.clone();
-            let at = ctx.pointer_hover_pos().and_then(|_| None);
+            let _ = ctx;
             self.with_page(|page, ed| ed.paste(page, &clip, at));
             self.mark_dirty(pid);
             return;
@@ -1813,7 +1832,7 @@ impl App {
                 if let Some(buf) = image::RgbaImage::from_raw(img.width as u32, img.height as u32, img.bytes.into_owned()) {
                     let mut png = Vec::new();
                     if image::DynamicImage::ImageRgba8(buf).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).is_ok() {
-                        self.import_files(vec![(None, Some(png.into()), "clipboard.png".into())], None);
+                        self.import_files(vec![(None, Some(png.into()), "clipboard.png".into())], at);
                         return;
                     }
                 }
@@ -1829,8 +1848,14 @@ impl App {
             };
             let size = self.settings.default_size;
             let font = self.settings.default_font.clone();
-            self.insert_item(ItemKind::Text(TextBlock::new(&t, size, &font)), 480.0);
-            self.with_page(|_, ed| ed.editing = None);
+            if let Some(id) = self.insert_item(ItemKind::Text(TextBlock::new(&t, size, &font)), 480.0) {
+                self.with_page(|page, ed| {
+                    ed.editing = None;
+                    if let (Some(p), Some(it)) = (at, page.item_mut(id)) {
+                        it.pos = [p.x, p.y];
+                    }
+                });
+            }
         }
     }
 

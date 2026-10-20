@@ -803,6 +803,15 @@ pub struct ImageItem {
     pub alt: String,
     #[serde(default)]
     pub ocr_text: Option<String>,
+    /// Vertical stretch relative to the picture's own proportions (0 = none).
+    #[serde(default)]
+    pub stretch: f32,
+}
+
+impl ImageItem {
+    pub fn stretch_k(&self) -> f32 {
+        if self.stretch > 0.0 { self.stretch } else { 1.0 }
+    }
 }
 
 pub fn full_crop() -> [f32; 4] {
