@@ -1998,7 +1998,15 @@ impl eframe::App for App {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if !dropped.is_empty() {
             let at = ctx.pointer_hover_pos().and_then(|_| None);
-            let files = dropped
+            // Notes from other apps are converted; everything else is inserted on the page.
+            let (notes, dropped): (Vec<_>, Vec<_>) = dropped.into_iter().partition(|f| {
+                let p = f.path();
+                p.is_dir() || matches!(crate::import::ext_of(p).as_str(), "one" | "onetoc2" | "onepkg" | "mht" | "mhtml" | "enex" | "jex" | "xopp" | "xoj" | "md" | "markdown" | "rtf" | "odt" | "nnbz")
+            });
+            for f in notes {
+                self.import_document(&ctx, f.path());
+            }
+            let files: Vec<_> = dropped
                 .into_iter()
                 .map(|f| {
                     let p = f.path().to_path_buf();

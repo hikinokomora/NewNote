@@ -479,22 +479,12 @@ impl App {
 
     // ---- import -------------------------------------------------------------------
 
-    /// Imports a document as new page(s) of the current section.
+    /// Imports a document as new page(s) of the current section, or a whole
+    /// notebook (OneNote notebooks and packages, Joplin, folders, zip exports).
     pub fn import_document(&mut self, ctx: &egui::Context, path: &Path) {
-        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let ext = crate::import::ext_of(path);
         let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let docs: Vec<(String, String)> = match ext.as_str() {
-            "html" | "htm" => std::fs::read(path).map(|b| vec![(stem.clone(), crate::export::html_to_markup(&String::from_utf8_lossy(&b)))]).unwrap_or_default(),
-            "md" | "markdown" => std::fs::read_to_string(path).map(|s| vec![(stem.clone(), crate::export::markdown_to_markup(&s))]).unwrap_or_default(),
-            "txt" => std::fs::read(path).map(|b| vec![(stem.clone(), String::from_utf8_lossy(&b).to_string())]).unwrap_or_default(),
-            "enex" => std::fs::read_to_string(path).map(|s| crate::export::parse_enex(&s)).unwrap_or_default(),
-            "docx" => match crate::export::docx_to_markup(path) {
-                Ok(s) => vec![(stem.clone(), s)],
-                Err(e) => {
-                    self.set_status(format!("Ошибка DOCX: {e}"));
-                    return;
-                }
-            },
+        match ext.as_str() {
             "pdf" => {
                 // New page with a printout of the PDF.
                 let Some(ni) = self.cur_nb else { return };
@@ -512,13 +502,17 @@ impl App {
                 self.pdf_printout_from(path.to_owned(), [0.0, 0.0]);
                 return;
             }
-            "nnbz" | "zip" => {
+            "nnbz" => {
+                self.import_archive(ctx, path, None);
+                return;
+            }
+            "zip" if zip_has_notebook(path) => {
                 self.import_archive(ctx, path, None);
                 return;
             }
             "csv" | "xlsx" | "xls" | "ods" => {
                 let cells = if ext == "csv" {
-                    std::fs::read(path).ok().map(|b| crate::export::parse_csv(&String::from_utf8_lossy(&b)))
+                    std::fs::read(path).ok().map(|b| crate::export::parse_csv(&crate::import::decode_text(&b)))
                 } else {
                     crate::export::table_from_xlsx(path).ok()
                 };
@@ -529,32 +523,101 @@ impl App {
                 }
                 return;
             }
-            _ => {
-                self.set_status("Формат не поддерживается");
+            _ => {}
+        }
+        let opts = crate::import::Opts { author: self.settings.author.clone(), font: self.settings.default_font.clone(), size: self.settings.default_size };
+        if crate::import::is_notebook_source(path) {
+            // Whole notebook: build it in a fresh folder.
+            let _ = std::fs::create_dir_all(&self.settings.notebooks_dir);
+            let mut nb = match Notebook::create(&self.settings.notebooks_dir, &stem) {
+                Ok(nb) => nb,
+                Err(e) => {
+                    self.set_status(format!("Ошибка: {e}"));
+                    return;
+                }
+            };
+            let dir = nb.path.clone();
+            match crate::import::import(path, &nb, &opts) {
+                Ok(imp) => {
+                    if !imp.name.is_empty() {
+                        nb.meta.name = imp.name.clone();
+                    }
+                    let mut count = 0;
+                    let mut tree = store_nodes(&nb, imp.nodes, &self.settings.author, &mut count);
+                    if !imp.pages.is_empty() {
+                        let mut s = Section::new("Импорт", 5);
+                        s.pages = store_pages(&nb, imp.pages, &self.settings.author, &mut count);
+                        tree.push(Node::Section(s));
+                    }
+                    if tree.is_empty() {
+                        drop(nb);
+                        let _ = std::fs::remove_dir_all(dir);
+                        self.set_status("Нечего импортировать");
+                        return;
+                    }
+                    nb.meta.tree = tree;
+                    nb.save_meta();
+                    drop(nb);
+                    self.open_notebook_folder(ctx, &dir);
+                    self.report_import(count, &imp.warnings);
+                }
+                Err(e) => {
+                    drop(nb);
+                    let _ = std::fs::remove_dir_all(dir);
+                    self.set_status(format!("Импорт не удался: {e}"));
+                }
+            }
+            return;
+        }
+        let Some(ni) = self.cur_nb else {
+            self.set_status("Сначала откройте блокнот");
+            return;
+        };
+        let imp = match crate::import::import(path, &self.notebooks[ni], &opts) {
+            Ok(i) => i,
+            Err(e) => {
+                self.set_status(format!("Импорт не удался: {e}"));
                 return;
             }
         };
-        let Some(ni) = self.cur_nb else { return };
-        let Some(sid) = self.cur_section else { return };
-        let mut last = None;
-        let count = docs.len();
-        for (title, text) in docs {
-            let pm = PageMeta::new(&title, &self.settings.author);
-            let pid = pm.id;
-            let mut page = Page::new(pid);
-            page.items.push(Item::new(egui::pos2(0.0, 0.0), 680.0, ItemKind::Text(TextBlock::new(&text, self.settings.default_size, &self.settings.default_font)), &self.settings.author));
-            if let Some(s) = self.notebooks[ni].meta.section_mut(sid) {
-                s.pages.push(pm);
+        let mut count = 0;
+        let nb = &self.notebooks[ni];
+        let nodes = store_nodes(nb, imp.nodes, &self.settings.author, &mut count);
+        let first_new_section = nodes.iter().find_map(|n| if let Node::Section(s) = n { Some(s.id) } else { None });
+        let pages = store_pages(nb, imp.pages, &self.settings.author, &mut count);
+        let mut last = pages.last().map(|p| p.id);
+        if !pages.is_empty() {
+            match self.cur_section.and_then(|sid| self.notebooks[ni].meta.section_mut(sid)) {
+                Some(s) => s.pages.extend(pages),
+                None => {
+                    let mut s = Section::new("Импорт", 5);
+                    s.pages = pages;
+                    self.notebooks[ni].meta.tree.push(Node::Section(s));
+                }
             }
-            let nb = &self.notebooks[ni];
-            storage::write_page(&nb.page_path(pid), &page, nb.key_for_page(pid));
-            last = Some(pid);
+        }
+        if !nodes.is_empty() {
+            self.notebooks[ni].meta.tree.extend(nodes);
+            if last.is_none() {
+                if let Some(sid) = first_new_section {
+                    self.cur_section = Some(sid);
+                    last = self.notebooks[ni].meta.section_mut(sid).and_then(|s| s.pages.first().map(|p| p.id));
+                }
+            }
         }
         self.notebooks[ni].dirty = true;
         self.notebooks[ni].save_meta();
         self.open_page(last);
         self.rebuild_index(ctx);
-        self.set_status(format!("Импортировано страниц: {count}"));
+        self.report_import(count, &imp.warnings);
+    }
+
+    fn report_import(&mut self, count: usize, warnings: &[String]) {
+        if warnings.is_empty() {
+            self.set_status(format!("Импортировано страниц: {count}"));
+        } else {
+            self.set_status(format!("Импортировано страниц: {count}. Предупреждения: {}", warnings.join("; ")));
+        }
     }
 
     pub fn export_archive(&mut self, ni: usize, path: &Path) {
@@ -765,4 +828,45 @@ pub fn copy_dir(src: &Path, dst: &Path) {
             }
         }
     }
+}
+
+fn zip_has_notebook(path: &Path) -> bool {
+    std::fs::File::open(path).ok().and_then(|f| zip::ZipArchive::new(f).ok()).is_some_and(|mut z| z.by_name("notebook.json").is_ok())
+}
+
+/// Writes imported pages to disk and returns their metadata.
+fn store_pages(nb: &Notebook, pages: Vec<crate::import::ImpPage>, author: &str, count: &mut usize) -> Vec<PageMeta> {
+    pages
+        .into_iter()
+        .map(|ip| {
+            let mut pm = PageMeta::new(&ip.title, author);
+            if let Some(c) = ip.created {
+                pm.created = c;
+                pm.modified = c;
+            }
+            pm.level = ip.level;
+            let mut page = ip.page;
+            page.id = pm.id;
+            storage::write_page(&nb.page_path(pm.id), &page, nb.key_for_page(pm.id));
+            *count += 1;
+            pm
+        })
+        .collect()
+}
+
+fn store_nodes(nb: &Notebook, nodes: Vec<crate::import::ImpNode>, author: &str, count: &mut usize) -> Vec<Node> {
+    nodes
+        .into_iter()
+        .filter_map(|n| match n {
+            crate::import::ImpNode::Section(s) => {
+                let mut sec = Section::new(&s.name, s.color);
+                sec.pages = store_pages(nb, s.pages, author, count);
+                Some(Node::Section(sec))
+            }
+            crate::import::ImpNode::Group(name, children) => {
+                let children = store_nodes(nb, children, author, count);
+                (!children.is_empty()).then(|| Node::Group(SectionGroup { id: new_id(), name, children, collapsed: false }))
+            }
+        })
+        .collect()
 }

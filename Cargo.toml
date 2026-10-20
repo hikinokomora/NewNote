@@ -23,6 +23,11 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 similar = "2"
 rust_xlsxwriter = { version = "0.90", default-features = false }
 calamine = { version = "0.31", default-features = false }
+onenote_parser = { version = "2.1", features = ["onepkg"] }
+typed-path = "0.12"
+cab = "0.6"
+tar = "0.4"
+flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

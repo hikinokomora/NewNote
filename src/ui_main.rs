@@ -98,14 +98,25 @@ pub(crate) fn file_menu(app: &mut App, ui: &mut Ui) {
         }
     }
     ui.separator();
-    if ui.button("Импорт (HTML, MD, TXT, ENEX, DOCX, PDF, CSV, XLSX)…").clicked() {
+    if ui.button("Импорт файлов…").on_hover_text("OneNote (.one, .onetoc2, .onepkg), MHT, HTML, Markdown, TXT, Evernote, Word, ODT, RTF, Xournal++, SVG, Joplin, Google Keep, Simplenote, Standard Notes, PDF, CSV, Excel").clicked() {
         if let Some(files) = rfd::FileDialog::new()
-            .add_filter("Документы", &["html", "htm", "md", "markdown", "txt", "enex", "docx", "pdf", "csv", "xlsx", "xls", "ods"])
+            .add_filter("Все поддерживаемые", crate::import::SUPPORTED)
+            .add_filter("OneNote", &["one", "onetoc2", "onepkg"])
+            .add_filter("Веб-страницы", &["mht", "mhtml", "html", "htm"])
+            .add_filter("Текст и Markdown", &["md", "markdown", "txt", "rtf", "odt", "docx"])
+            .add_filter("Рисунки", &["xopp", "xoj", "svg"])
+            .add_filter("Другие заметки", &["enex", "jex", "json", "zip"])
             .pick_files()
         {
             for f in files {
                 app.import_document(&ctx, &f);
             }
+        }
+        ui.close();
+    }
+    if ui.button("Импорт папки (OneNote, Obsidian, Notion, Keep)…").clicked() {
+        if let Some(dir) = rfd::FileDialog::new().set_title("Папка с заметками").pick_folder() {
+            app.import_document(&ctx, &dir);
         }
         ui.close();
     }
