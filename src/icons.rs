@@ -73,6 +73,29 @@ pub enum Icon {
     Lock,
     Sticky,
     Chart,
+    Back,
+    Forward,
+    Sync,
+    Bulb,
+    Bell,
+    Share,
+    Fullscreen,
+    More,
+    Painter,
+    ClearFormat,
+    Marker,
+    FontColor,
+    Audio,
+    Video,
+    Symbol,
+    Equation,
+    Template,
+    Translate,
+    Dictate,
+    Feedback,
+    Store,
+    Pages,
+    Person,
 }
 
 fn line(p: &Painter, pts: &[Pos2], s: Stroke) {
@@ -439,6 +462,112 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             for (x, h) in [(6.5, 6.0), (10.5, 10.0), (14.5, 4.0)] {
                 p.rect_filled(Rect::from_min_max(q(x - 1.3, 17.0 - h), q(x + 1.3, 17.0)), 0.0, color);
             }
+        }
+        Icon::Back | Icon::Forward => {
+            let f = if icon == Icon::Forward { -1.0 } else { 1.0 };
+            let qx = |x: f32, y: f32| q(10.0 + (x - 10.0) * f, y);
+            line(p, &[qx(16.0, 10.0), qx(4.0, 10.0)], s);
+            line(p, &[qx(9.0, 5.0), qx(4.0, 10.0), qx(9.0, 15.0)], s);
+        }
+        Icon::Sync => {
+            line(p, &circle_pts(q(10.0, 10.0), 6.5 * k, PI * 1.1, PI * 1.9, 12), s);
+            line(p, &circle_pts(q(10.0, 10.0), 6.5 * k, PI * 0.1, PI * 0.9, 12), s);
+            line(p, &[q(17.4, 5.7), q(16.2, 8.0), q(13.9, 6.8)], s);
+            line(p, &[q(2.6, 14.3), q(3.8, 12.0), q(6.1, 13.2)], s);
+        }
+        Icon::Bulb => {
+            line(p, &circle_pts(q(10.0, 8.0), 5.0 * k, 2.5, 7.0, 24), s);
+            line(p, &[q(7.6, 12.4), q(7.8, 14.5), q(12.2, 14.5), q(12.4, 12.4)], s);
+            line(p, &[q(8.0, 16.8), q(12.0, 16.8)], s);
+        }
+        Icon::Bell => {
+            let mut pts = vec![q(4.0, 14.5)];
+            pts.extend(circle_pts(q(10.0, 9.0), 5.0 * k, PI, TAU, 14).iter().map(|v| *v));
+            pts.insert(1, q(5.0, 12.5));
+            pts.push(q(15.0, 12.5));
+            pts.push(q(16.0, 14.5));
+            pts.push(q(4.0, 14.5));
+            line(p, &pts, s);
+            line(p, &circle_pts(q(10.0, 15.0), 2.0 * k, 0.0, PI, 8), s);
+        }
+        Icon::Share => {
+            line(p, &[q(8.0, 5.0), q(4.0, 5.0), q(4.0, 16.0), q(15.0, 16.0), q(15.0, 12.0)], s);
+            line(p, &[q(9.0, 11.0), q(16.0, 4.0)], s);
+            line(p, &[q(11.0, 4.0), q(16.0, 4.0), q(16.0, 9.0)], s);
+        }
+        Icon::Fullscreen => {
+            for (a, b, c) in [((3.0, 7.0), (3.0, 3.0), (7.0, 3.0)), ((13.0, 3.0), (17.0, 3.0), (17.0, 7.0)), ((17.0, 13.0), (17.0, 17.0), (13.0, 17.0)), ((7.0, 17.0), (3.0, 17.0), (3.0, 13.0))] {
+                line(p, &[q(a.0, a.1), q(b.0, b.1), q(c.0, c.1)], s);
+            }
+        }
+        Icon::More => {
+            for x in [5.0, 10.0, 15.0] {
+                p.circle_filled(q(x, 10.0), 1.1 * k, color);
+            }
+        }
+        Icon::Painter => {
+            p.rect_stroke(Rect::from_min_max(q(3.0, 3.0), q(15.0, 7.5)), 1.0 * k, s, egui::StrokeKind::Middle);
+            line(p, &[q(15.0, 5.2), q(17.0, 5.2), q(17.0, 10.0), q(10.0, 10.0), q(10.0, 12.0)], s);
+            p.rect_filled(Rect::from_min_max(q(8.8, 12.0), q(11.2, 17.5)), 0.6 * k, color);
+        }
+        Icon::ClearFormat => {
+            line(p, &[q(4.0, 4.0), q(14.0, 4.0)], s);
+            line(p, &[q(9.0, 4.0), q(7.0, 15.0)], s);
+            line(p, &[q(11.0, 11.0), q(17.0, 17.0)], s);
+            line(p, &[q(17.0, 11.0), q(11.0, 17.0)], s);
+        }
+        Icon::Marker => {
+            line(p, &[q(6.0, 13.0), q(13.5, 3.5), q(16.5, 6.5), q(9.0, 16.0), q(6.0, 13.0)], s);
+            line(p, &[q(6.0, 13.0), q(4.0, 17.0), q(7.5, 16.5)], s);
+        }
+        Icon::FontColor => {
+            line(p, &[q(5.0, 14.0), q(10.0, 2.5), q(15.0, 14.0)], s);
+            line(p, &[q(6.8, 10.0), q(13.2, 10.0)], s);
+        }
+        Icon::Audio => {
+            p.circle_stroke(q(10.0, 10.0), 7.5 * k, s);
+            p.circle_filled(q(10.0, 10.0), 3.0 * k, color);
+        }
+        Icon::Video => {
+            p.rect_stroke(Rect::from_min_max(q(2.5, 5.5), q(13.0, 14.5)), 1.5 * k, s, egui::StrokeKind::Middle);
+            line(p, &[q(13.0, 9.0), q(17.5, 6.0), q(17.5, 14.0), q(13.0, 11.0)], s);
+        }
+        Icon::Symbol => {
+            p.text(q(10.0, 10.5), egui::Align2::CENTER_CENTER, "Ω", egui::FontId::proportional(15.0 * k), color);
+        }
+        Icon::Equation => {
+            p.text(q(10.0, 10.5), egui::Align2::CENTER_CENTER, "π", egui::FontId::proportional(16.0 * k), color);
+        }
+        Icon::Template => {
+            p.rect_stroke(Rect::from_min_max(q(3.0, 3.0), q(17.0, 17.0)), 1.5 * k, s, egui::StrokeKind::Middle);
+            line(p, &[q(3.0, 7.5), q(17.0, 7.5)], thin);
+            line(p, &[q(8.0, 7.5), q(8.0, 17.0)], thin);
+        }
+        Icon::Translate => {
+            p.text(q(6.5, 7.0), egui::Align2::CENTER_CENTER, "A", egui::FontId::proportional(9.0 * k), color);
+            p.text(q(13.5, 13.5), egui::Align2::CENTER_CENTER, "Я", egui::FontId::proportional(9.0 * k), color);
+            line(p, &[q(3.0, 17.0), q(8.0, 12.0)], thin);
+            line(p, &[q(12.0, 3.0), q(17.0, 8.0)], thin);
+        }
+        Icon::Dictate => {
+            p.rect_stroke(Rect::from_min_max(q(7.5, 2.5), q(12.5, 12.0)), 2.5 * k, s, egui::StrokeKind::Middle);
+            line(p, &circle_pts(q(10.0, 9.5), 5.0 * k, 0.0, PI, 10), s);
+            line(p, &[q(10.0, 14.5), q(10.0, 17.5)], s);
+        }
+        Icon::Feedback => {
+            line(p, &[q(3.0, 4.0), q(17.0, 4.0), q(17.0, 13.0), q(9.0, 13.0), q(5.0, 17.0), q(5.0, 13.0), q(3.0, 13.0), q(3.0, 4.0)], s);
+        }
+        Icon::Store => {
+            line(p, &[q(3.0, 7.0), q(17.0, 7.0), q(16.0, 17.0), q(4.0, 17.0), q(3.0, 7.0)], s);
+            line(p, &circle_pts(q(10.0, 7.0), 3.0 * k, PI, TAU, 10), s);
+        }
+        Icon::Pages => {
+            p.rect_stroke(Rect::from_min_max(q(5.0, 2.5), q(15.0, 15.0)), 1.0 * k, s, egui::StrokeKind::Middle);
+            line(p, &[q(3.0, 5.0), q(3.0, 17.5), q(13.0, 17.5)], thin);
+        }
+        Icon::Person => {
+            p.circle_stroke(q(10.0, 7.0), 3.5 * k, s);
+            line(p, &circle_pts(q(10.0, 18.0), 6.5 * k, PI, TAU, 14), s);
         }
     }
 }

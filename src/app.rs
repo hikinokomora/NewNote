@@ -223,6 +223,10 @@ pub struct App {
     pub nav_hidden: bool,
     pub recent: Vec<Id>,
     pub page_filter: String,
+    /// Page history for the back / forward buttons.
+    pub hist_back: Vec<Id>,
+    pub hist_fwd: Vec<Id>,
+    hist_nav: bool,
 }
 
 impl App {
@@ -308,6 +312,9 @@ impl App {
             nav_hidden: false,
             recent: Vec::new(),
             page_filter: String::new(),
+            hist_back: Vec::new(),
+            hist_fwd: Vec::new(),
+            hist_nav: false,
             settings,
         };
         app.apply_theme(&ctx);
@@ -423,6 +430,39 @@ impl App {
         self.open_page(pid);
     }
 
+    fn page_exists(&self, pid: Id) -> bool {
+        self.nb_index_of_page(pid).is_some()
+    }
+
+    /// Back / forward through the visited pages.
+    pub fn go_back(&mut self) {
+        while let Some(p) = self.hist_back.pop() {
+            if self.page_exists(p) && Some(p) != self.cur_page {
+                if let Some(c) = self.cur_page {
+                    self.hist_fwd.push(c);
+                }
+                self.hist_nav = true;
+                self.open_page(Some(p));
+                self.hist_nav = false;
+                return;
+            }
+        }
+    }
+
+    pub fn go_forward(&mut self) {
+        while let Some(p) = self.hist_fwd.pop() {
+            if self.page_exists(p) && Some(p) != self.cur_page {
+                if let Some(c) = self.cur_page {
+                    self.hist_back.push(c);
+                }
+                self.hist_nav = true;
+                self.open_page(Some(p));
+                self.hist_nav = false;
+                return;
+            }
+        }
+    }
+
     /// Switches the current page, saving the previous one.
     pub fn open_page(&mut self, page: Option<Id>) {
         if self.cur_page == page {
@@ -436,6 +476,13 @@ impl App {
             if let Some(ed) = self.editors.get_mut(&old) {
                 ed.editing = None;
                 ed.selection = Default::default();
+            }
+        }
+        if let (Some(old), false) = (self.cur_page, self.hist_nav) {
+            if page.is_some() {
+                self.hist_back.push(old);
+                self.hist_back.truncate(100);
+                self.hist_fwd.clear();
             }
         }
         self.cur_page = page;
@@ -1294,8 +1341,15 @@ impl App {
             }
         }
         if consume(sc(ctrl, Key::E)) {
-            self.right = Some(RightPanel::Search);
+            self.rail = RailMode::Search;
+            self.nav_hidden = false;
             self.search_focus = true;
+        }
+        if consume(sc(Modifiers::ALT, Key::ArrowLeft)) {
+            self.go_back();
+        }
+        if consume(sc(Modifiers::ALT, Key::ArrowRight)) {
+            self.go_forward();
         }
         if consume(sc(ctrl_alt, Key::L)) {
             self.lock_all();

@@ -206,6 +206,7 @@ pub struct Settings {
     pub page_list_details: bool,
     pub pages_right: bool,
     pub last_ribbon: u8,
+    pub status_bar: bool,
 
     // Editing
     pub autocorrect: bool,
@@ -308,6 +309,7 @@ impl Default for Settings {
             page_list_details: false,
             pages_right: false,
             last_ribbon: 0,
+            status_bar: false,
             pen_presets: Vec::new(),
             autocorrect: true,
             autocorrect_map: ac,

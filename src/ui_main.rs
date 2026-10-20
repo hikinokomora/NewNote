@@ -27,7 +27,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             .show_separator_line(false)
             .show(ui, |ui| crate::chrome::ribbon(app, ui));
     }
-    if !app.presentation {
+    if !app.presentation && app.settings.status_bar {
         egui::Panel::bottom("status")
             .frame(egui::Frame::new().fill(p.ribbon_bg).inner_margin(egui::Margin::symmetric(8, 2)))
             .show_separator_line(false)
@@ -74,6 +74,9 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
         central(app, ui, &ctx)
     });
     crate::ui_draw::pen_settings_window(app, &ctx);
+    if !app.settings.status_bar {
+        status_toast(app, &ctx);
+    }
     if custom && !app.presentation {
         crate::chrome::resize_edges(&ctx);
     }
@@ -252,7 +255,7 @@ pub(crate) fn tools_menu(app: &mut App, ui: &mut Ui) {
     }
 }
 
-fn export_menu(app: &mut App, ui: &mut Ui, section: bool) {
+pub(crate) fn export_menu(app: &mut App, ui: &mut Ui, section: bool) {
     let name = app.cur_page.and_then(|p| app.nb().and_then(|nb| nb.meta.page_meta(p))).map(|p| p.title.clone()).unwrap_or_default();
     if ui.button("PDF…").clicked() {
         let mut o = PrintOpts { whole_section: section, print: false, ..Default::default() };
@@ -539,7 +542,7 @@ fn pick_files(app: &mut App) {
 // Ribbon contents
 
 pub(crate) fn home_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
-    use crate::chrome::{flat, group};
+    use crate::chrome::{boxed, chevron, color_icon, flat, glyph, group};
     use crate::icons::Icon;
     let full = app.settings.ribbon_full;
     // Current text block properties for the combos.
@@ -555,11 +558,25 @@ pub(crate) fn home_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
         })
         .unwrap_or((app.settings.default_font.clone(), app.settings.default_size));
     group(ui, full, "Буфер обмена", |ui| {
-        let r = flat(ui, Some(Icon::Paste), "Вставить", "Вставить (Ctrl+V)", false);
-        if r.clicked() {
+        if flat(ui, Some(Icon::Paste), "", "Вставить (Ctrl+V)", false).clicked() {
             app.paste_from_clipboard(ctx);
         }
-        r.context_menu(|ui| {
+        let r = chevron(ui, "Параметры вставки");
+        egui::Popup::menu(&r).show(|ui| {
+            if ui.button("Вырезать   Ctrl+X").clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut);
+                ui.close();
+            }
+            if ui.button("Копировать   Ctrl+C").clicked() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy);
+                ui.close();
+            }
+            if ui.button("Вставить   Ctrl+V").clicked() {
+                app.paste_from_clipboard(ctx);
+                ui.close();
+            }
+            ui.separator();
+            ui.label(RichText::new("При вставке").small().weak());
             for (l, m) in [("Сохранить форматирование", crate::settings::PasteMode::KeepFormatting), ("Объединить форматирование", crate::settings::PasteMode::Merge), ("Только текст", crate::settings::PasteMode::TextOnly)] {
                 if ui.radio(app.settings.paste_mode == m, l).clicked() {
                     app.settings.paste_mode = m;
@@ -567,99 +584,105 @@ pub(crate) fn home_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
                 }
             }
         });
-        if flat(ui, Some(Icon::Cut), "", "Вырезать (Ctrl+X)", false).clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestCut);
-        }
-        if flat(ui, Some(Icon::Copy), "", "Копировать (Ctrl+C)", false).clicked() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::RequestCopy);
-        }
-        let painter_on = app.cur_page.and_then(|p| app.editors.get(&p)).is_some_and(|e| e.format_painter.is_some());
-        if flat(ui, Some(Icon::Brush), "", "Формат по образцу: поставьте курсор в образец, нажмите, затем щёлкните по блоку", painter_on).clicked() {
-            let st = app.cur_page.and_then(|p| Some(crate::items::style_under_cursor(ctx, app.pages.get(&p)?, app.editors.get(&p)?))).flatten();
-            app.with_page(|_, ed| {
-                ed.format_painter = if painter_on { None } else { st };
-                ed.editing = None;
-            });
-        }
     });
     group(ui, full, "Текст", |ui| {
+        ui.add_space(4.0);
         let shown = if font.is_empty() { "Segoe UI".to_string() } else { font.clone() };
-        egui::ComboBox::from_id_salt("font").width(120.0).selected_text(shown).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("font").width(118.0).height(400.0).selected_text(shown).show_ui(ui, |ui| {
             for f in crate::fonts::font_names() {
                 if ui.selectable_label(f == font, RichText::new(&f).font(crate::fonts::font(&f, 14.0, false, false, false))).clicked() {
                     app.format(ctx, FormatCmd::Font(f));
                 }
             }
         });
-        egui::ComboBox::from_id_salt("size").width(44.0).selected_text(format!("{size:.0}")).show_ui(ui, |ui| {
+        ui.add_space(4.0);
+        egui::ComboBox::from_id_salt("size").width(46.0).selected_text(format!("{size:.0}")).show_ui(ui, |ui| {
             for s in [8.0, 9.0, 10.0, 11.0, 12.0, 14.0, 15.0, 16.0, 18.0, 20.0, 24.0, 28.0, 32.0, 36.0, 48.0, 72.0] {
                 if ui.selectable_label(s == size, format!("{s:.0}")).clicked() {
                     app.format(ctx, FormatCmd::Size(s));
                 }
             }
         });
-        for (t, tip, cmd) in [
-            ("B", "Жирный (Ctrl+B)", FormatCmd::Wrap("**", "**")),
-            ("I", "Курсив (Ctrl+I)", FormatCmd::Wrap("*", "*")),
-            ("U", "Подчёркнутый (Ctrl+U)", FormatCmd::Wrap("__", "__")),
-            ("S", "Зачёркнутый (Ctrl+-)", FormatCmd::Wrap("~~", "~~")),
-            ("x²", "Верхний индекс (Ctrl+Shift+=)", FormatCmd::Wrap("^", "^")),
-            ("x₂", "Нижний индекс (Ctrl+=)", FormatCmd::Wrap(",,", ",,")),
-        ] {
-            let rt = match t {
-                "B" => RichText::new(t).strong().size(15.0),
-                "I" => RichText::new(t).italics().size(15.0),
-                "U" => RichText::new(t).underline().size(15.0),
-                "S" => RichText::new(t).strikethrough().size(15.0),
-                _ => RichText::new(t).size(14.0),
-            };
-            if ui.add(egui::Button::new(rt).frame(false).min_size(vec2(28.0, 30.0))).on_hover_text(tip).clicked() {
-                app.format(ctx, cmd);
-            }
+        ui.add_space(4.0);
+        if glyph(ui, "Ж", true, false, false, "Полужирный (Ctrl+B)").clicked() {
+            app.format(ctx, FormatCmd::Wrap("**", "**"));
         }
-        ui.menu_button(RichText::new("🖍").background_color(Color32::from_rgb(255, 240, 120)), |ui| {
+        if glyph(ui, "К", false, true, false, "Курсив (Ctrl+I)").clicked() {
+            app.format(ctx, FormatCmd::Wrap("*", "*"));
+        }
+        if glyph(ui, "Ч", false, false, true, "Подчёркнутый (Ctrl+U)").clicked() {
+            app.format(ctx, FormatCmd::Wrap("__", "__"));
+        }
+        if color_icon(ui, Icon::Marker, Color32::from_rgb(255, 230, 0), "Цвет выделения текста").clicked() {
+            app.format(ctx, FormatCmd::Wrap("==", "=="));
+        }
+        let r = chevron(ui, "Цвет выделения");
+        egui::Popup::menu(&r).show(|ui| {
             ui.label("Цвет выделения текста");
-            if ui.button("Жёлтое выделение").clicked() {
-                app.format(ctx, FormatCmd::Wrap("==", "=="));
-            }
             color_grid(ui, |c| app.format(ctx, FormatCmd::WrapOwned(format!("{{h:#{:02x}{:02x}{:02x}|", c[0], c[1], c[2]), "}".into())));
-        })
-        .response
-        .on_hover_text("Цвет выделения");
-        ui.menu_button(RichText::new("A").color(Color32::from_rgb(210, 40, 40)).strong().size(15.0), |ui| {
+        });
+        if color_icon(ui, Icon::FontColor, Color32::from_rgb(210, 40, 40), "Цвет шрифта").clicked() {
+            app.format(ctx, FormatCmd::Color([210, 40, 40, 255]));
+        }
+        let r = chevron(ui, "Цвет шрифта");
+        egui::Popup::menu(&r).show(|ui| {
             ui.label("Цвет текста");
             color_grid(ui, |c| app.format(ctx, FormatCmd::Color(c)));
-        })
-        .response
-        .on_hover_text("Цвет текста");
-        if ui.add(egui::Button::new(RichText::new("A⃠").size(14.0)).frame(false).min_size(vec2(28.0, 30.0))).on_hover_text("Очистить форматирование (Ctrl+Пробел)").clicked() {
+        });
+        let painter_on = app.cur_page.and_then(|p| app.editors.get(&p)).is_some_and(|e| e.format_painter.is_some());
+        if flat(ui, Some(Icon::Painter), "", "Формат по образцу: поставьте курсор в образец, нажмите, затем щёлкните по блоку", painter_on).clicked() {
+            let st = app.cur_page.and_then(|p| Some(crate::items::style_under_cursor(ctx, app.pages.get(&p)?, app.editors.get(&p)?))).flatten();
+            app.with_page(|_, ed| {
+                ed.format_painter = if painter_on { None } else { st };
+                ed.editing = None;
+            });
+        }
+        if flat(ui, Some(Icon::ClearFormat), "", "Очистить форматирование (Ctrl+Пробел)", false).clicked() {
             app.format(ctx, FormatCmd::Clear);
         }
+        let r = chevron(ui, "Другие параметры текста");
+        egui::Popup::menu(&r).show(|ui| {
+            for (l, cmd) in [
+                ("Зачёркнутый   Ctrl+-", FormatCmd::Wrap("~~", "~~")),
+                ("Верхний индекс   Ctrl+Shift+=", FormatCmd::Wrap("^", "^")),
+                ("Нижний индекс   Ctrl+=", FormatCmd::Wrap(",,", ",,")),
+            ] {
+                if ui.button(l).clicked() {
+                    app.format(ctx, cmd);
+                    ui.close();
+                }
+            }
+        });
     });
     group(ui, full, "Абзац", |ui| {
         for (icon, tip, cmd) in [
             (Icon::Bullets, "Маркированный список (Ctrl+.)", FormatCmd::LinePrefix("- ".into())),
             (Icon::Numbers, "Нумерованный список (Ctrl+/)", FormatCmd::LinePrefix("1. ".into())),
-            (Icon::Checkbox, "Список с флажками", FormatCmd::LinePrefix("[ ] ".into())),
             (Icon::Outdent, "Уменьшить отступ", FormatCmd::Indent(true)),
             (Icon::Indent, "Увеличить отступ", FormatCmd::Indent(false)),
-            (Icon::AlignLeft, "По левому краю", FormatCmd::Align(Align::Left)),
-            (Icon::AlignCenter, "По центру", FormatCmd::Align(Align::Center)),
-            (Icon::AlignRight, "По правому краю", FormatCmd::Align(Align::Right)),
-            (Icon::Justify, "По ширине", FormatCmd::Align(Align::Justify)),
         ] {
             if flat(ui, Some(icon), "", tip, false).clicked() {
                 app.format(ctx, cmd);
             }
         }
-        ui.menu_button("↕", |ui| {
-            ui.label("Межстрочный интервал");
-            for s in [1.0, 1.15, 1.5, 2.0, 2.5] {
-                if ui.button(format!("{s}")).clicked() {
-                    app.format(ctx, FormatCmd::Spacing(s));
-                    ui.close();
+        let r = chevron(ui, "Выравнивание и интервалы");
+        egui::Popup::menu(&r).show(|ui| {
+            ui.horizontal(|ui| {
+                for (icon, tip, a) in [(Icon::AlignLeft, "По левому краю", Align::Left), (Icon::AlignCenter, "По центру", Align::Center), (Icon::AlignRight, "По правому краю", Align::Right), (Icon::Justify, "По ширине", Align::Justify)] {
+                    if flat(ui, Some(icon), "", tip, false).clicked() {
+                        app.format(ctx, FormatCmd::Align(a));
+                    }
                 }
-            }
+            });
+            ui.separator();
+            ui.label("Межстрочный интервал");
+            ui.horizontal(|ui| {
+                for s in [1.0, 1.15, 1.5, 2.0, 2.5] {
+                    if ui.button(format!("{s}")).clicked() {
+                        app.format(ctx, FormatCmd::Spacing(s));
+                    }
+                }
+            });
             ui.separator();
             if ui.button("Справа налево / слева направо").clicked() {
                 app.format(ctx, FormatCmd::Rtl);
@@ -689,16 +712,56 @@ pub(crate) fn home_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
                     app.mark_dirty(pid);
                 }
             }
-        })
-        .response
-        .on_hover_text("Интервалы и направление текста");
+        });
+    });
+    group(ui, full, "Теги", |ui| {
+        let tags = app.settings.tags.clone();
+        let todo = tags.iter().find(|t| t.is_task).cloned();
+        if flat(ui, Some(Icon::Checkbox), "", "Тег «Задача» (Ctrl+1)", false).clicked() {
+            match &todo {
+                Some(t) => app.toggle_tag_current(t),
+                None => app.format(ctx, FormatCmd::LinePrefix("[ ] ".into())),
+            }
+        }
+        let r = chevron(ui, "Все теги");
+        egui::Popup::menu(&r).show(|ui| {
+            ui.set_min_width(230.0);
+            for t in &tags {
+                let col = Color32::from_rgb(t.color[0], t.color[1], t.color[2]);
+                let mut job = egui::text::LayoutJob::default();
+                job.append(&format!("{} ", t.icon), 0.0, egui::TextFormat { color: col, font_id: egui::FontId::proportional(14.0), ..Default::default() });
+                job.append(&t.name, 0.0, egui::TextFormat { color: ui.visuals().text_color(), font_id: egui::FontId::proportional(14.0), ..Default::default() });
+                if let Some(d) = t.shortcut {
+                    job.append(&format!("   Ctrl+{d}"), 0.0, egui::TextFormat { color: ui.visuals().weak_text_color(), font_id: egui::FontId::proportional(12.0), ..Default::default() });
+                }
+                if ui.button(job).clicked() {
+                    app.toggle_tag_current(t);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui.button("Найти теги").clicked() {
+                app.right = Some(RightPanel::Tags);
+                app.collect_summary(ctx);
+                ui.close();
+            }
+            if ui.button("Мои задачи").clicked() {
+                app.right = Some(RightPanel::Tasks);
+                app.collect_summary(ctx);
+                ui.close();
+            }
+            if ui.button("Настроить теги…").clicked() {
+                app.dialogs.push(Dialog::Tags);
+                ui.close();
+            }
+        });
     });
     group(ui, full, "Стили", |ui| {
         let styles: [(&str, &str, f32, bool); 10] = [
             ("Заголовок 1", "# ", 15.0, true),
-            ("Заголовок 2", "## ", 13.5, true),
-            ("Заголовок 3", "### ", 12.5, true),
-            ("Заголовок 4", "#### ", 12.0, true),
+            ("Заголовок 2", "## ", 14.0, true),
+            ("Заголовок 3", "### ", 13.0, true),
+            ("Заголовок 4", "#### ", 12.5, true),
             ("Заголовок 5", "##### ", 12.0, false),
             ("Заголовок 6", "###### ", 12.0, false),
             ("Обычный текст", "", 12.0, false),
@@ -706,20 +769,15 @@ pub(crate) fn home_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
             ("Примечание", "!> ", 12.0, false),
             ("Код", "```", 12.0, false),
         ];
-        ui.spacing_mut().item_spacing.x = 6.0;
-        for (l, pfx, sz, bold) in styles.iter().take(2) {
-            let mut t = RichText::new(*l).size(*sz);
-            if *bold {
-                t = t.strong();
-            }
-            if ui.add(egui::Button::new(t).frame(false).min_size(vec2(0.0, 30.0))).on_hover_text("Ctrl+Alt+1 / Ctrl+Alt+2").clicked() {
-                app.format(ctx, FormatCmd::LinePrefix((*pfx).into()));
-            }
-            ui.add_space(4.0);
+        ui.add_space(4.0);
+        let (main, arrow) = boxed(ui, "Заголовок 1", 132.0, crate::fonts::font("", 13.5, false, false, false), "Заголовок 1 (Ctrl+Alt+1)");
+        if main.clicked() {
+            app.format(ctx, FormatCmd::LinePrefix("# ".into()));
         }
-        ui.menu_button("⌄", |ui| {
+        egui::Popup::menu(&arrow).show(|ui| {
+            ui.set_min_width(200.0);
             for (l, pfx, sz, bold) in styles {
-                let mut t = RichText::new(l).size(sz);
+                let mut t = RichText::new(l).size(sz + 1.0);
                 if bold {
                     t = t.strong();
                 }
@@ -732,48 +790,10 @@ pub(crate) fn home_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
                     ui.close();
                 }
             }
-        })
-        .response
-        .on_hover_text("Все стили");
-    });
-    group(ui, full, "Теги", |ui| {
-        let tags = app.settings.tags.clone();
-        ui.spacing_mut().item_spacing.x = 8.0;
-        for t in tags.iter().take(3) {
-            let col = Color32::from_rgb(t.color[0], t.color[1], t.color[2]);
-            let label = RichText::new(format!("{} {}", t.icon, t.name)).color(col);
-            let tip = t.shortcut.map(|d| format!("Ctrl+{d}")).unwrap_or_default();
-            if ui.add(egui::Button::new(label).frame(false).min_size(vec2(0.0, 30.0))).on_hover_text(tip).clicked() {
-                app.toggle_tag_current(t);
-            }
-        }
-        ui.menu_button("⌄", |ui| {
-            for t in app.settings.tags.clone() {
-                let label = match t.shortcut {
-                    Some(d) => format!("{} {}   Ctrl+{d}", t.icon, t.name),
-                    None => format!("{} {}", t.icon, t.name),
-                };
-                if ui.button(label).clicked() {
-                    app.toggle_tag_current(&t);
-                    ui.close();
-                }
-            }
-            ui.separator();
-            if ui.button("Настроить теги…").clicked() {
-                app.dialogs.push(Dialog::Tags);
-                ui.close();
-            }
         });
-        if flat(ui, Some(Icon::Tag), "Найти теги", "Сводка тегов", app.right == Some(RightPanel::Tags)).clicked() {
-            app.right = if app.right == Some(RightPanel::Tags) { None } else { Some(RightPanel::Tags) };
-            app.collect_summary(ctx);
-        }
-        if flat(ui, Some(Icon::Checkbox), "Задачи", "Мои задачи", app.right == Some(RightPanel::Tasks)).clicked() {
-            app.right = if app.right == Some(RightPanel::Tasks) { None } else { Some(RightPanel::Tasks) };
-            app.collect_summary(ctx);
-        }
+        ui.add_space(4.0);
     });
-    group(ui, full, "Правописание и поиск", |ui| {
+    group(ui, full, "Инструменты", |ui| {
         let on = app.settings.spellcheck;
         if flat(ui, None, "ABC✓", "Проверка орфографии", on).clicked() {
             app.settings.spellcheck = !on;
@@ -782,10 +802,8 @@ pub(crate) fn home_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
         if flat(ui, Some(Icon::Find), "", "Найти на странице (Ctrl+F)", false).clicked() {
             app.with_page(|_, ed| ed.find.open = true);
         }
-    });
-    group(ui, full, "Экспорт", |ui| {
-        if flat(ui, Some(Icon::Pdf), "PDF", "Быстрый экспорт страницы в PDF", false).clicked() {
-            app.dialogs.push(Dialog::Print(PrintOpts { print: false, ..Default::default() }));
+        if flat(ui, Some(Icon::Dictate), "", "Диктовка (Win+H)", false).clicked() {
+            crate::winapi::start_dictation();
         }
         if flat(ui, Some(Icon::Printer), "", "Печать (Ctrl+P)", false).clicked() {
             app.dialogs.push(Dialog::Print(PrintOpts::default()));
@@ -822,13 +840,13 @@ pub(crate) fn insert_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
         if flat(ui, Some(Icon::Page), "Страница", "Новая страница (Ctrl+N)", false).clicked() {
             app.new_page(false);
         }
-        if flat(ui, None, "Подстраница", "Ctrl+Alt+Shift+N", false).clicked() {
+        if flat(ui, Some(Icon::Pages), "Подстраница", "Ctrl+Alt+Shift+N", false).clicked() {
             app.new_page(true);
         }
         if flat(ui, Some(Icon::Section), "Раздел", "Новый раздел (Ctrl+T)", false).clicked() {
             app.new_section();
         }
-        if flat(ui, None, "Шаблоны", "Страница из шаблона", false).clicked() {
+        if flat(ui, Some(Icon::Template), "Шаблоны", "Страница из шаблона", false).clicked() {
             app.dialogs.push(Dialog::Templates);
         }
     });
@@ -917,10 +935,10 @@ pub(crate) fn insert_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
         });
     });
     group(ui, full, "Символы", |ui| {
-        if flat(ui, Some(Icon::Math), "Формула", "Редактор формул и решение уравнений", false).clicked() {
+        if flat(ui, Some(Icon::Equation), "Формула", "Редактор формул и решение уравнений", false).clicked() {
             app.insert_item(ItemKind::Equation(String::new()), 420.0);
         }
-        if flat(ui, None, "Ω Символ", "Специальные знаки и эмодзи", false).clicked() {
+        if flat(ui, Some(Icon::Symbol), "Символ", "Специальные знаки и эмодзи", false).clicked() {
             app.dialogs.push(Dialog::Symbols);
         }
         let r = flat(ui, None, "― Линия ⌄", "", false);
@@ -961,6 +979,9 @@ pub(crate) fn view_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
     use crate::icons::Icon;
     let full = app.settings.ribbon_full;
     group(ui, full, "Режимы", |ui| {
+        if flat(ui, Some(Icon::Fullscreen), "Во весь экран", "Полностраничное представление: скрыть разделы и страницы", app.nav_hidden).clicked() {
+            app.nav_hidden = !app.nav_hidden;
+        }
         if flat(ui, Some(Icon::Focus), "Фокус", "Режим фокусировки (F11)", app.focus_mode).clicked() {
             app.focus_mode = !app.focus_mode;
         }
@@ -971,7 +992,7 @@ pub(crate) fn view_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
         if flat(ui, Some(Icon::Speaker), "Читать вслух", "", app.right == Some(RightPanel::Reading)).clicked() {
             app.right = if app.right == Some(RightPanel::Reading) { None } else { Some(RightPanel::Reading) };
         }
-        if flat(ui, Some(Icon::Mic), "Диктовка", "Голосовой ввод Windows (Win+H)", false).clicked() {
+        if flat(ui, Some(Icon::Dictate), "Диктовка", "Голосовой ввод Windows (Win+H)", false).clicked() {
             crate::winapi::start_dictation();
         }
     });
@@ -1017,9 +1038,13 @@ pub(crate) fn view_ribbon(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
         if flat(ui, Some(Icon::Notebooks), "Навигация", "Показать или скрыть панели блокнотов и страниц", !app.nav_hidden).clicked() {
             app.nav_hidden = !app.nav_hidden;
         }
+        if flat(ui, None, "Строка состояния", "Показать строку состояния внизу окна", app.settings.status_bar).clicked() {
+            app.settings.status_bar = !app.settings.status_bar;
+            app.settings.save();
+        }
     });
     group(ui, full, "Окно", |ui| {
-        if flat(ui, None, "Новое окно", "Страница в отдельном окне (Ctrl+M)", false).clicked() {
+        if flat(ui, Some(Icon::Pages), "Новое окно", "Страница в отдельном окне (Ctrl+M)", false).clicked() {
             app.pin_current(false);
         }
         if flat(ui, Some(Icon::Pin), "Поверх окон", "Закрепить страницу поверх других окон", false).clicked() {
@@ -1147,25 +1172,38 @@ fn nav_tree(app: &mut App, ui: &mut Ui) {
     } else if app.settings.sections_on_top {
         ui.label(RichText::new("Разделы показаны вкладками над страницей").small().color(p.weak));
     } else {
-        egui::ScrollArea::vertical().id_salt("nav_scroll").auto_shrink([false, true]).show(ui, |ui| {
+        let bottom = add_row_rect(ui);
+        egui::ScrollArea::vertical().id_salt("nav_scroll").max_height(ui.available_height() - bottom.height()).auto_shrink([false, true]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             let tree_nodes = app.notebooks[ni].meta.tree.clone();
             tree(ui, app, ni, &tree_nodes, &mut actions, 0);
-            ui.add_space(4.0);
-            let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), egui::Sense::click());
-            if resp.hovered() {
-                ui.painter().rect_filled(r, 0.0, p.hover);
-            }
-            icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(r.min.x + 18.0, r.center().y), vec2(14.0, 14.0)), Icon::Plus, p.weak);
-            ui.painter().text(egui::pos2(r.min.x + 34.0, r.center().y), egui::Align2::LEFT_CENTER, "Добавить раздел", egui::FontId::proportional(13.0), p.weak);
-            if resp.clicked() {
-                app.new_section();
-            }
         });
+        if add_row(ui, bottom, "Добавить раздел", "Ctrl+T").clicked() {
+            app.new_section();
+        }
     }
     for a in actions {
         apply_nav(app, ui.ctx(), a);
     }
+}
+
+/// Space for the "+ Добавить …" button pinned to the bottom of a column.
+fn add_row_rect(ui: &Ui) -> egui::Rect {
+    let full = ui.available_rect_before_wrap();
+    egui::Rect::from_min_max(egui::pos2(full.min.x, full.max.y - 40.0), full.max)
+}
+
+fn add_row(ui: &mut Ui, r: egui::Rect, text: &str, tip: &str) -> egui::Response {
+    use crate::icons::{self, Icon};
+    let p = crate::chrome::cur(ui);
+    let resp = ui.interact(r, ui.id().with(("add_row", text)), egui::Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(r, 0.0, p.hover);
+    }
+    ui.painter().hline(r.x_range(), r.min.y, egui::Stroke::new(1.0, p.border));
+    icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(r.min.x + 20.0, r.center().y), vec2(14.0, 14.0)), Icon::Plus, p.accent);
+    ui.painter().text(egui::pos2(r.min.x + 36.0, r.center().y), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(13.5), p.accent);
+    resp.on_hover_text(tip)
 }
 
 /// One row of the sections list with a coloured tab on the left.
@@ -1174,6 +1212,7 @@ fn section_row(ui: &mut Ui, label: &str, color: Color32, selected: bool, depth: 
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), egui::Sense::click());
     if selected {
         ui.painter().rect_filled(r, 0.0, p.sel);
+        ui.painter().rect_filled(egui::Rect::from_min_size(r.min, vec2(3.0, r.height())), 0.0, p.accent);
     } else if resp.hovered() {
         ui.painter().rect_filled(r, 0.0, p.hover);
     }
@@ -1553,30 +1592,36 @@ fn page_list(app: &mut App, ui: &mut Ui) {
         });
         return;
     }
-    // Filter and sort.
+    // Sort (with the filter inside its menu).
     let mut sort = sec.sort;
     ui.horizontal(|ui| {
-        let w = ui.available_width() - 34.0;
-        let (r, _) = ui.allocate_exact_size(vec2(w, 30.0), egui::Sense::hover());
-        ui.painter().rect_stroke(r, 4.0, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
-        icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(r.min.x + 14.0, r.center().y), vec2(13.0, 13.0)), Icon::Search, p.weak);
-        let inner = egui::Rect::from_min_max(egui::pos2(r.min.x + 26.0, r.min.y + 6.0), egui::pos2(r.max.x - 6.0, r.max.y - 4.0));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-        child.add(egui::TextEdit::singleline(&mut app.page_filter).frame(egui::Frame::NONE).hint_text("Фильтр страниц").desired_width(inner.width()));
-        let (r2, resp) = ui.allocate_exact_size(vec2(28.0, 30.0), egui::Sense::click());
-        if resp.hovered() {
-            ui.painter().rect_filled(r2, 4.0, p.hover);
-        }
-        icons::paint(ui.painter(), egui::Rect::from_center_size(r2.center(), vec2(16.0, 16.0)), Icon::Sort, p.text);
-        egui::Popup::menu(&resp.on_hover_text("Сортировка страниц")).show(|ui| {
-            ui.selectable_value(&mut sort, PageSort::Manual, "Вручную");
-            ui.selectable_value(&mut sort, PageSort::Title, "По названию");
-            ui.selectable_value(&mut sort, PageSort::Created, "По дате создания");
-            ui.selectable_value(&mut sort, PageSort::Modified, "По дате изменения");
-            ui.separator();
-            if ui.checkbox(&mut app.settings.page_list_details, "Подробный список").changed() {
-                app.settings.save();
+        ui.add_space(8.0);
+        if !app.page_filter.trim().is_empty() {
+            let chip = ui.add(egui::Button::new(RichText::new(format!("Фильтр: {}  ✕", app.page_filter.trim())).size(12.0)).corner_radius(10.0));
+            if chip.on_hover_text("Сбросить фильтр").clicked() {
+                app.page_filter.clear();
             }
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add_space(4.0);
+            let (r2, resp) = ui.allocate_exact_size(vec2(30.0, 30.0), egui::Sense::click());
+            if resp.hovered() {
+                ui.painter().rect_filled(r2, 4.0, p.hover);
+            }
+            icons::paint(ui.painter(), egui::Rect::from_center_size(r2.center(), vec2(16.0, 16.0)), Icon::Sort, p.text);
+            egui::Popup::menu(&resp.on_hover_text("Сортировка и фильтр страниц")).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+                ui.set_min_width(220.0);
+                ui.add(egui::TextEdit::singleline(&mut app.page_filter).hint_text("🔍 Фильтр страниц").desired_width(210.0));
+                ui.separator();
+                ui.selectable_value(&mut sort, PageSort::Manual, "Вручную");
+                ui.selectable_value(&mut sort, PageSort::Title, "По названию");
+                ui.selectable_value(&mut sort, PageSort::Created, "По дате создания");
+                ui.selectable_value(&mut sort, PageSort::Modified, "По дате изменения");
+                ui.separator();
+                if ui.checkbox(&mut app.settings.page_list_details, "Подробный список").changed() {
+                    app.settings.save();
+                }
+            });
         });
     });
     if sort != sec.sort {
@@ -1585,15 +1630,9 @@ fn page_list(app: &mut App, ui: &mut Ui) {
         }
         app.notebooks[ni].dirty = true;
     }
-    ui.add_space(4.0);
-    // Add page row.
-    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), egui::Sense::click());
-    if resp.hovered() {
-        ui.painter().rect_filled(r, 0.0, p.hover);
-    }
-    icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(r.min.x + 18.0, r.center().y), vec2(14.0, 14.0)), Icon::Plus, p.accent_text);
-    ui.painter().text(egui::pos2(r.min.x + 34.0, r.center().y), egui::Align2::LEFT_CENTER, "Добавить страницу", egui::FontId::proportional(13.0), p.accent_text);
-    if resp.on_hover_text("Ctrl+N; правый щелчок — подстраница").clicked() {
+    ui.add_space(2.0);
+    let bottom = add_row_rect(ui);
+    if add_row(ui, bottom, "Добавить страницу", "Ctrl+N; Ctrl+Alt+Shift+N — подстраница").clicked() {
         app.new_page(false);
     }
     let pages: Vec<PageMeta> = sorted_pages(&sec).into_iter().cloned().collect();
@@ -1615,7 +1654,7 @@ fn page_list(app: &mut App, ui: &mut Ui) {
     let mut ops: Vec<(Id, &'static str)> = Vec::new();
     let mut reorder: Option<(Id, Id)> = None;
     let mut move_to: Option<(Id, usize, Id)> = None;
-    egui::ScrollArea::vertical().id_salt("pages_scroll").auto_shrink([false, true]).show(ui, |ui| {
+    egui::ScrollArea::vertical().id_salt("pages_scroll").max_height(ui.available_height() - bottom.height()).auto_shrink([false, true]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut hidden_below: Option<u8> = None;
         for (i, pm) in pages.iter().enumerate() {
@@ -1953,9 +1992,9 @@ fn central(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 if let Some(m) = meta {
                     let wc = if dark { Color32::from_gray(150) } else { Color32::from_gray(110) };
-                    ui.label(RichText::new(crate::chrome::long_date(&m.created)).color(wc).size(15.0));
+                    ui.label(RichText::new(crate::chrome::long_date(&m.created)).color(wc).size(19.0));
                     ui.add_space(26.0);
-                    ui.label(RichText::new(m.created.format("%-H:%M").to_string()).color(wc).size(15.0));
+                    ui.label(RichText::new(m.created.format("%-H:%M").to_string()).color(wc).size(19.0));
                     if !m.author.is_empty() {
                         ui.add_space(14.0);
                         ui.label(RichText::new(&m.author).color(wc).small());
@@ -2115,6 +2154,30 @@ fn find_bar(app: &mut App, ui: &mut Ui, pid: Id) {
             ed.find.open = false;
         }
     }
+}
+
+/// Without the status bar, messages pop up at the bottom of the window.
+fn status_toast(app: &App, ctx: &egui::Context) {
+    let age = now_secs() - app.status.1;
+    if app.status.0.is_empty() || age > 6.0 {
+        return;
+    }
+    let p = crate::chrome::pal(ctx.global_style().visuals.dark_mode);
+    let alpha = ((6.0 - age) / 0.6).clamp(0.0, 1.0) as f32;
+    egui::Area::new(egui::Id::new("status_toast"))
+        .anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -28.0))
+        .interactable(false)
+        .order(egui::Order::Tooltip)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(p.ribbon_bg.gamma_multiply(alpha))
+                .stroke(egui::Stroke::new(1.0, p.border.gamma_multiply(alpha)))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(14, 8))
+                .shadow(egui::epaint::Shadow { offset: [0, 2], blur: 10, spread: 0, color: Color32::from_black_alpha((60.0 * alpha) as u8) })
+                .show(ui, |ui| ui.label(RichText::new(&app.status.0).color(p.text.gamma_multiply(alpha))));
+        });
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
 }
 
 fn status_bar(app: &mut App, ui: &mut Ui) {

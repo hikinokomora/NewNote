@@ -1,5 +1,5 @@
-//! Window chrome in the style of OneNote: custom title bar with search and
-//! window buttons, tabbed ribbon with flat icon buttons, and the left rail.
+//! Window chrome in the style of OneNote: custom title bar with page history
+//! and window buttons, tabbed ribbon with flat icon buttons, and the left rail.
 
 use egui::{Align2, Color32, CursorIcon, FontId, Rect, Response, Sense, Stroke, Ui, vec2};
 
@@ -27,7 +27,7 @@ pub struct Pal {
 pub fn pal(dark: bool) -> Pal {
     if dark {
         Pal {
-            title_bg: Color32::from_rgb(31, 31, 31),
+            title_bg: Color32::from_rgb(41, 41, 41),
             title_fg: Color32::from_gray(235),
             ribbon_bg: Color32::from_rgb(41, 41, 41),
             accent: Color32::from_rgb(184, 134, 224),
@@ -107,6 +107,69 @@ pub fn flat_menu(ui: &mut Ui, icon: Icon, label: &str, tip: &str, add: impl FnOn
     egui::Popup::menu(&r).show(add);
 }
 
+/// Text glyph button ("Ж", "К", "Ч"): same look as `flat`.
+pub fn glyph(ui: &mut Ui, text: &str, bold: bool, italic: bool, underline: bool, tip: &str) -> Response {
+    let p = cur(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 32.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, p.hover);
+    }
+    let g = ui.painter().layout_no_wrap(text.to_owned(), crate::fonts::font("", 15.0, bold, italic, false), p.text);
+    let pos = egui::pos2(rect.center().x - g.size().x / 2.0, rect.center().y - g.size().y / 2.0);
+    let w = g.size().x;
+    let h = g.size().y;
+    ui.painter().galley(pos, g, p.text);
+    if underline {
+        ui.painter().hline(pos.x..=pos.x + w, pos.y + h - 2.0, Stroke::new(1.2, p.text));
+    }
+    resp.on_hover_text(tip)
+}
+
+/// Narrow dropdown arrow next to a split button.
+pub fn chevron(ui: &mut Ui, tip: &str) -> Response {
+    let p = cur(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(16.0, 32.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, p.hover);
+    }
+    icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(11.0, 11.0)), Icon::Chevron, p.text);
+    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
+}
+
+/// Icon with a colour bar under it (highlighter, font colour).
+pub fn color_icon(ui: &mut Ui, icon: Icon, bar: Color32, tip: &str) -> Response {
+    let p = cur(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 32.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, p.hover);
+    }
+    icons::paint(ui.painter(), Rect::from_center_size(rect.center() - vec2(0.0, 2.0), vec2(17.0, 17.0)), icon, p.text);
+    ui.painter().rect_filled(Rect::from_center_size(egui::pos2(rect.center().x, rect.center().y + 9.0), vec2(16.0, 3.5)), 0.5, bar);
+    resp.on_hover_text(tip)
+}
+
+/// Combo-like box with a caption (style gallery).
+pub fn boxed(ui: &mut Ui, text: &str, width: f32, font: FontId, tip: &str) -> (Response, Response) {
+    let p = cur(ui);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+    let r = Rect::from_min_max(egui::pos2(rect.min.x, rect.min.y + 3.0), egui::pos2(rect.max.x, rect.max.y - 3.0));
+    let main = Rect::from_min_max(r.min, egui::pos2(r.max.x - 20.0, r.max.y));
+    let arrow = Rect::from_min_max(egui::pos2(r.max.x - 20.0, r.min.y), r.max);
+    let mr = ui.interact(main, ui.id().with(("boxed", text)), Sense::click());
+    let ar = ui.interact(arrow, ui.id().with(("boxed_arrow", text)), Sense::click());
+    if mr.hovered() {
+        ui.painter().rect_filled(main, 3.0, p.hover);
+    }
+    if ar.hovered() {
+        ui.painter().rect_filled(arrow, 3.0, p.hover);
+    }
+    ui.painter().rect_stroke(r, 3.0, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+    let g = ui.painter().layout_no_wrap(text.to_owned(), font, p.text);
+    ui.painter().with_clip_rect(main.shrink(2.0)).galley(egui::pos2(main.min.x + 8.0, main.center().y - g.size().y / 2.0), g, p.text);
+    icons::paint(ui.painter(), Rect::from_center_size(arrow.center(), vec2(11.0, 11.0)), Icon::Chevron, p.text);
+    (mr.on_hover_text(tip), ar)
+}
+
 /// Thin vertical divider between ribbon groups.
 pub fn divider(ui: &mut Ui) {
     let p = cur(ui);
@@ -147,104 +210,66 @@ pub fn title_bar(app: &mut App, ui: &mut Ui) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
         }
     }
+    // Page and notebook name, centred over the whole bar.
+    let title = app
+        .cur_page
+        .and_then(|pid| app.nb().and_then(|nb| nb.meta.page_meta(pid)))
+        .map(|pm| if pm.title.trim().is_empty() { "Без названия".to_string() } else { pm.title.clone() })
+        .unwrap_or_default();
+    let nb = app.nb().map(|n| n.meta.name.clone()).unwrap_or_default();
+    let caption = match (title.is_empty(), nb.is_empty()) {
+        (true, true) => "NewNote".to_string(),
+        (true, false) => nb,
+        (false, true) => title,
+        _ => format!("{title} - {nb}"),
+    };
+    let author = app.settings.author.clone();
+    let author_g = ui.painter().layout_no_wrap(author, FontId::proportional(12.0), p.title_fg);
+    let right_w = author_g.size().x + 20.0 + if custom { 46.0 * 3.0 } else { 0.0 };
+    let g = ui.painter().layout_no_wrap(caption, FontId::proportional(12.0), p.title_fg);
+    let free = Rect::from_min_max(egui::pos2(rect.min.x + 90.0, rect.min.y), egui::pos2(rect.max.x - right_w - 10.0, rect.max.y));
+    if free.width() > 60.0 {
+        let x = (rect.center().x - g.size().x / 2.0).clamp(free.min.x, (free.max.x - g.size().x).max(free.min.x));
+        ui.painter().with_clip_rect(free).galley(egui::pos2(x, rect.center().y - g.size().y / 2.0), g, p.title_fg);
+    }
     ui.allocate_ui_with_layout(vec2(rect.width(), 34.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.set_height(34.0);
-        ui.spacing_mut().item_spacing.x = 2.0;
-        ui.add_space(8.0);
-        let (ir, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
-        icons::paint(ui.painter(), ir, Icon::Notebooks, p.title_fg);
-        ui.add_space(6.0);
-        if title_btn(ui, Icon::Undo, "Отменить (Ctrl+Z)", p).clicked() {
-            if let Some(pid) = app.cur_page {
-                if app.with_page(|pg, ed| ed.undo(pg)) == Some(true) {
-                    app.mark_dirty(pid);
-                }
-            }
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(4.0);
+        let can_back = !app.hist_back.is_empty();
+        if title_btn(ui, Icon::Back, "Назад (Alt+←)", p, can_back).clicked() && can_back {
+            app.go_back();
         }
-        if title_btn(ui, Icon::Redo, "Повторить (Ctrl+Y)", p).clicked() {
-            if let Some(pid) = app.cur_page {
-                if app.with_page(|pg, ed| ed.redo(pg)) == Some(true) {
-                    app.mark_dirty(pid);
-                }
-            }
+        let can_fwd = !app.hist_fwd.is_empty();
+        if title_btn(ui, Icon::Forward, "Вперёд (Alt+→)", p, can_fwd).clicked() && can_fwd {
+            app.go_forward();
         }
-        if title_btn(ui, Icon::Page, "Новая страница (Ctrl+N)", p).clicked() {
-            app.new_page(false);
-        }
-        ui.add_space(10.0);
-        // Page and notebook name.
-        let title = app
-            .cur_page
-            .and_then(|pid| app.nb().and_then(|nb| nb.meta.page_meta(pid)))
-            .map(|pm| if pm.title.trim().is_empty() { "Без названия".to_string() } else { pm.title.clone() })
-            .unwrap_or_default();
-        let nb = app.nb().map(|n| n.meta.name.clone()).unwrap_or_default();
-        let caption = if title.is_empty() { format!("{nb} — NewNote") } else { format!("{title} — {nb}") };
-        let avail = ui.available_width();
-        // Centered search box.
-        let search_w = 330.0f32.min(avail * 0.45);
-        let right_w = if custom { 46.0 * 3.0 + 40.0 } else { 40.0 };
-        let caption_w = (avail - search_w - right_w).max(0.0) * 0.5;
-        let (cr, _) = ui.allocate_exact_size(vec2(caption_w, 28.0), Sense::hover());
-        let g = ui.painter().layout(caption, FontId::proportional(12.0), p.title_fg, cr.width());
-        if cr.width() > 40.0 {
-            let clipped = ui.painter().with_clip_rect(cr);
-            clipped.galley(egui::pos2(cr.min.x, cr.center().y - g.size().y / 2.0), g, p.title_fg);
-        }
-        search_box(app, ui, search_w, p);
         let rest = ui.available_width() - right_w;
         if rest > 0.0 {
             ui.add_space(rest);
         }
-        let gear = title_btn(ui, Icon::Settings, "Настройки", p);
-        egui::Popup::menu(&gear).show(|ui| settings_menu(app, ui));
+        let (ar, aresp) = ui.allocate_exact_size(vec2(author_g.size().x + 20.0, 30.0), Sense::click());
+        if aresp.hovered() {
+            ui.painter().rect_filled(ar, 4.0, Color32::from_white_alpha(24));
+        }
+        ui.painter().galley(egui::pos2(ar.min.x + 10.0, ar.center().y - author_g.size().y / 2.0), author_g, p.title_fg);
+        if aresp.on_hover_text("Имя автора заметок").clicked() {
+            app.dialogs.push(Dialog::Settings(0));
+        }
         if custom {
             window_buttons(ui, &ctx, p);
         }
     });
 }
 
-fn title_btn(ui: &mut Ui, icon: Icon, tip: &str, p: Pal) -> Response {
-    let (r, resp) = ui.allocate_exact_size(vec2(32.0, 30.0), Sense::click());
-    if resp.hovered() {
-        ui.painter().rect_filled(r, 4.0, Color32::from_white_alpha(30));
+fn title_btn(ui: &mut Ui, icon: Icon, tip: &str, p: Pal, enabled: bool) -> Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(40.0, 34.0), Sense::click());
+    if resp.hovered() && enabled {
+        ui.painter().rect_filled(r, 0.0, Color32::from_white_alpha(24));
     }
-    icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(16.0, 16.0)), icon, p.title_fg);
+    let col = if enabled { p.title_fg } else { p.title_fg.gamma_multiply(0.4) };
+    icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(16.0, 16.0)), icon, col);
     resp.on_hover_text(tip)
-}
-
-fn search_box(app: &mut App, ui: &mut Ui, w: f32, p: Pal) {
-    let (r, _) = ui.allocate_exact_size(vec2(w, 26.0), Sense::hover());
-    ui.painter().rect_filled(r, 5.0, p.search_bg);
-    icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(r.min.x + 15.0, r.center().y), vec2(14.0, 14.0)), Icon::Search, p.title_fg);
-    let inner = Rect::from_min_max(egui::pos2(r.min.x + 28.0, r.min.y + 4.0), egui::pos2(r.max.x - 8.0, r.max.y - 3.0));
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    let id = egui::Id::new("title_search");
-    let resp = child.add(
-        egui::TextEdit::singleline(&mut app.search_q)
-            .id(id)
-            .frame(egui::Frame::NONE)
-            .text_color(p.title_fg)
-            .hint_text(egui::RichText::new("Поиск (Ctrl+E)").color(p.title_fg.gamma_multiply(0.75)))
-            .desired_width(inner.width()),
-    );
-    if app.search_focus {
-        resp.request_focus();
-        app.search_focus = false;
-    }
-    if resp.changed() && !app.search_q.trim().is_empty() {
-        app.rail = RailMode::Search;
-        app.nav_hidden = false;
-    }
-    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !app.search_q.trim().is_empty() {
-        app.rail = RailMode::Search;
-        app.nav_hidden = false;
-        let q = app.search_q.trim().to_owned();
-        app.settings.recent_searches.retain(|x| *x != q);
-        app.settings.recent_searches.insert(0, q);
-        app.settings.recent_searches.truncate(15);
-        app.settings.save();
-    }
 }
 
 fn window_buttons(ui: &mut Ui, ctx: &egui::Context, p: Pal) {
@@ -269,7 +294,7 @@ fn window_buttons(ui: &mut Ui, ctx: &egui::Context, p: Pal) {
     }
 }
 
-fn settings_menu(app: &mut App, ui: &mut Ui) {
+pub fn settings_menu(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     if ui.button("Параметры…").clicked() {
         app.dialogs.push(Dialog::Settings(0));
@@ -299,6 +324,9 @@ fn settings_menu(app: &mut App, ui: &mut Ui) {
         }
         if ui.checkbox(&mut app.ribbon_collapsed, "Свернуть ленту").changed() {}
     });
+    if ui.checkbox(&mut app.settings.status_bar, "Строка состояния").changed() {
+        app.settings.save();
+    }
     ui.menu_button("Разделы и страницы", |ui| {
         if ui.checkbox(&mut app.settings.sections_on_top, "Разделы вкладками над страницей").changed() {
             app.settings.save();
@@ -394,14 +422,39 @@ pub fn ribbon(app: &mut App, ui: &mut Ui) {
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             ui.add_space(6.0);
-            let (r, resp) = ui.allocate_exact_size(vec2(28.0, 26.0), Sense::click());
-            if resp.hovered() {
-                ui.painter().rect_filled(r, 4.0, p.hover);
-            }
-            icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(14.0, 14.0)), if app.ribbon_collapsed { Icon::Chevron } else { Icon::ChevronUp }, p.weak);
-            if resp.on_hover_text(if app.ribbon_collapsed { "Закрепить ленту" } else { "Свернуть ленту" }).clicked() {
+            if tab_icon(ui, if app.ribbon_collapsed { Icon::Chevron } else { Icon::ChevronUp }, if app.ribbon_collapsed { "Закрепить ленту" } else { "Свернуть ленту" }, false, p).clicked() {
                 app.ribbon_collapsed = !app.ribbon_collapsed;
+            }
+            let more = tab_icon(ui, Icon::More, "Параметры и прочее", false, p);
+            egui::Popup::menu(&more).show(|ui| settings_menu(app, ui));
+            let full_page = app.nav_hidden;
+            if tab_icon(ui, Icon::Fullscreen, "Полностраничное представление (Ctrl+Shift+F)", full_page, p).clicked() {
+                app.nav_hidden = !app.nav_hidden;
+            }
+            let share = tab_text(ui, Icon::Share, "Общий доступ", p);
+            egui::Popup::menu(&share).show(|ui| {
+                ui.set_min_width(220.0);
+                crate::ui_main::export_menu(app, ui, false);
+            });
+            let tasks = app.right == Some(RightPanel::Tasks);
+            if tab_icon(ui, Icon::Bell, "Мои задачи и напоминания", tasks, p).clicked() {
+                app.right = if tasks { None } else { Some(RightPanel::Tasks) };
+                app.collect_summary(&ctx);
+            }
+            let helper = app.right == Some(RightPanel::Helper);
+            if tab_icon(ui, Icon::Bulb, "Помощник", helper, p).clicked() {
+                app.right = if helper { None } else { Some(RightPanel::Helper) };
+            }
+            let saving = !app.dirty.is_empty();
+            let sync = tab_icon(ui, Icon::Sync, if saving { "Сохранение…" } else { "Все изменения сохранены. Нажмите, чтобы сохранить сейчас" }, false, p);
+            if saving {
+                ui.painter().circle_filled(sync.rect.right_top() + vec2(-8.0, 8.0), 3.0, p.accent);
+            }
+            if sync.clicked() {
+                app.save_all();
+                app.set_status("Сохранено");
             }
         });
     });
@@ -412,6 +465,7 @@ pub fn ribbon(app: &mut App, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
             ui.add_space(6.0);
+            undo_redo(app, ui);
             match app.ribbon {
                 Ribbon::Home => crate::ui_main::home_ribbon(app, ui, &ctx),
                 Ribbon::Insert => crate::ui_main::insert_ribbon(app, ui, &ctx),
@@ -422,6 +476,45 @@ pub fn ribbon(app: &mut App, ui: &mut Ui) {
         });
     });
     ui.add_space(2.0);
+}
+
+fn undo_redo(app: &mut App, ui: &mut Ui) {
+    let can_undo = app.cur_page.and_then(|p| app.editors.get(&p)).is_some_and(|e| e.can_undo());
+    let can_redo = app.cur_page.and_then(|p| app.editors.get(&p)).is_some_and(|e| e.can_redo());
+    for (icon, tip, redo, on) in [(Icon::Undo, "Отменить (Ctrl+Z)", false, can_undo), (Icon::Redo, "Повторить (Ctrl+Y)", true, can_redo)] {
+        ui.add_enabled_ui(on, |ui| {
+            if flat(ui, Some(icon), "", tip, false).clicked() {
+                if let Some(pid) = app.cur_page {
+                    if app.with_page(|pg, ed| if redo { ed.redo(pg) } else { ed.undo(pg) }) == Some(true) {
+                        app.mark_dirty(pid);
+                    }
+                }
+            }
+        });
+    }
+    divider(ui);
+}
+
+fn tab_icon(ui: &mut Ui, icon: Icon, tip: &str, active: bool, p: Pal) -> Response {
+    let (r, resp) = ui.allocate_exact_size(vec2(32.0, 28.0), Sense::click());
+    if active {
+        ui.painter().rect_filled(r, 4.0, p.sel);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(r, 4.0, p.hover);
+    }
+    icons::paint(ui.painter(), Rect::from_center_size(r.center(), vec2(16.0, 16.0)), icon, if active { p.accent_text } else { p.text });
+    resp.on_hover_text(tip)
+}
+
+fn tab_text(ui: &mut Ui, icon: Icon, text: &str, p: Pal) -> Response {
+    let g = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(13.0), p.text);
+    let (r, resp) = ui.allocate_exact_size(vec2(g.size().x + 36.0, 28.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(r, 4.0, p.hover);
+    }
+    icons::paint(ui.painter(), Rect::from_center_size(egui::pos2(r.min.x + 15.0, r.center().y), vec2(16.0, 16.0)), icon, p.text);
+    ui.painter().galley(egui::pos2(r.min.x + 28.0, r.center().y - g.size().y / 2.0), g, p.text);
+    resp
 }
 
 fn tab(ui: &mut Ui, text: &str, active: bool, p: Pal) -> Response {
@@ -445,7 +538,7 @@ fn tab(ui: &mut Ui, text: &str, active: bool, p: Pal) -> Response {
 fn help_ribbon(app: &mut App, ui: &mut Ui) {
     let full = app.settings.ribbon_full;
     group(ui, full, "Справка", |ui| {
-        if flat(ui, Some(Icon::Help), "Руководство", "Краткое руководство по программе", false).clicked() {
+        if flat(ui, Some(Icon::Help), "Справка", "Краткое руководство по программе", false).clicked() {
             app.dialogs.push(Dialog::Report(
                 "Руководство".into(),
                 vec![
@@ -454,12 +547,30 @@ fn help_ribbon(app: &mut App, ui: &mut Ui) {
                     "Shift при рисовании — прямая линия. Задержите перо в конце линии — получится ровная фигура.".into(),
                     "Зачеркните рукопись зигзагом, чтобы удалить её.".into(),
                     "Ctrl+колесо или щипок — масштаб, пробел + перетаскивание — прокрутка.".into(),
+                    "Alt+← и Alt+→ — назад и вперёд по просмотренным страницам.".into(),
                     "Быстрая заметка из любого окна: Win+Alt+N.".into(),
                 ],
             ));
         }
-        if flat(ui, None, "Горячие клавиши", "", false).clicked() {
+        if flat(ui, Some(Icon::Text), "Сочетания клавиш", "", false).clicked() {
             app.dialogs.push(Dialog::Hotkeys);
+        }
+        if flat(ui, Some(Icon::Bulb), "Что нового", "", false).clicked() {
+            app.dialogs.push(Dialog::Report(
+                "Что нового".into(),
+                vec![
+                    "Импорт OneNote: разделы .one, записные книжки .onetoc2 и пакеты .onepkg — текст, списки, таблицы, рисунки, вложения и рукописный ввод.".into(),
+                    "Импорт веб-архивов MHT, Evernote с вложениями, Joplin, Google Keep, Simplenote, Standard Notes, Obsidian и Notion.".into(),
+                    "Рисунки Xournal++ и SVG превращаются в рукописные штрихи, которые можно править.".into(),
+                    "Кнопки «Назад» и «Вперёд» в заголовке окна.".into(),
+                ],
+            ));
+        }
+        if flat(ui, Some(Icon::Feedback), "Отзыв", "Как сообщить о проблеме", false).clicked() {
+            app.dialogs.push(Dialog::Report(
+                "Отзыв".into(),
+                vec!["Программа работает без сети и ничего не отправляет сама.".into(), "Опишите проблему и приложите файл журнала из папки настроек — так её проще всего воспроизвести.".into()],
+            ));
         }
         if flat(ui, None, "О программе", "Сведения о версии", false).clicked() {
             app.dialogs.push(Dialog::About);
