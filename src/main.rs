@@ -70,7 +70,7 @@ fn main() -> eframe::Result {
             .with_decorations(native_frame)
             .with_transparent(false)
             .with_icon(icon),
-        multisampling: 4,
+        multisampling: 0,
         ..Default::default()
     };
     eframe::run_native("NewNote", options, Box::new(move |cc| Ok(Box::new(app::App::new(cc, add, minimized)))))

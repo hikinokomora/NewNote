@@ -620,6 +620,67 @@ impl App {
         }
     }
 
+    /// Brings one page back from a backup as a new page next to the current one;
+    /// nothing else in the notebook changes.
+    pub fn restore_page_from_backup(&mut self, backup: &Path, meta: &PageMeta) {
+        let Some(ni) = self.cur_nb else { return };
+        let archive = match storage::read_backup(backup, self.backup_key.as_ref()) {
+            Ok(a) => a,
+            Err(e) => {
+                self.set_status(format!("Копия не читается: {e}"));
+                return;
+            }
+        };
+        let Some(data) = storage::backup_file(&archive, &format!("pages/{}.page", meta.id)) else {
+            self.set_status("В этой копии нет файла страницы (она не была сохранена до копирования)");
+            return;
+        };
+        let key = self.notebooks[ni].key_for_page(meta.id).cloned();
+        let mut page = match storage::decode_page(&data, key.as_ref()) {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_status(format!("Страница в копии не читается: {e}"));
+                return;
+            }
+        };
+        // Pictures and attachments that are gone from the notebook come back too.
+        for it in &page.items {
+            if let ItemKind::Image(ImageItem { asset, .. }) | ItemKind::File(FileItem { asset, .. }) = &it.kind {
+                let dst = self.notebooks[ni].asset_path(asset);
+                if !dst.exists() {
+                    if let Some(bytes) = storage::backup_file(&archive, &format!("assets/{asset}")) {
+                        storage::atomic_write(&dst, &bytes);
+                    }
+                }
+            }
+        }
+        let when = backup.file_stem().map(|s| s.to_string_lossy().to_string()).and_then(|s| chrono::NaiveDateTime::parse_from_str(s.get(..15)?, "%Y%m%d-%H%M%S").ok());
+        let mut pm = meta.clone();
+        pm.id = new_id();
+        pm.level = 0;
+        pm.title = match when {
+            Some(t) => format!("{} (копия от {})", meta.title, t.format("%d.%m.%Y %H:%M")),
+            None => format!("{} (из копии)", meta.title),
+        };
+        page.id = pm.id;
+        let sid = self.cur_section.or_else(|| self.notebooks[ni].meta.sections().first().map(|s| s.id));
+        let Some(sid) = sid else { return };
+        let pid = pm.id;
+        let nb = &self.notebooks[ni];
+        if !storage::write_page(&nb.page_path(pid), &page, nb.key_for_page(pid).or(key.as_ref())) {
+            self.set_status("Не удалось записать страницу");
+            return;
+        }
+        if let Some(s) = self.notebooks[ni].meta.section_mut(sid) {
+            s.pages.push(pm);
+        }
+        self.notebooks[ni].dirty = true;
+        self.notebooks[ni].save_meta();
+        self.cur_section = Some(sid);
+        self.open_page(Some(pid));
+        self.set_status("Страница возвращена из резервной копии");
+    }
+
     pub fn export_archive(&mut self, ni: usize, path: &Path) {
         self.save_all();
         match storage::zip_dir(&self.notebooks[ni].path, true) {
@@ -658,6 +719,7 @@ impl App {
                 self.open_notebook_folder(ctx, &dst);
             }
             Some((ni, policy)) => {
+                self.safety_backup(ni, "перед объединением");
                 let Ok(src) = Notebook::open(&tmp) else {
                     self.set_status("В архиве нет блокнота");
                     return;

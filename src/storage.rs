@@ -47,6 +47,8 @@ pub struct Notebook {
     /// True while a password-protected notebook has not been unlocked yet.
     pub sealed: bool,
     pub dirty: bool,
+    /// Set when the notebook file was damaged and had to be recovered.
+    pub recovered: Option<String>,
 }
 
 impl Notebook {
@@ -70,14 +72,41 @@ impl Notebook {
             keys: HashMap::new(),
             sealed: false,
             dirty: true,
+            recovered: None,
         };
         nb.save_meta();
         Ok(nb)
     }
 
+    /// Previous good copy of `notebook.json`, refreshed at most every few minutes.
+    pub fn meta_backup_file(path: &Path) -> PathBuf {
+        path.join("notebook.json.bak")
+    }
+
+    /// Opens a notebook; a damaged `notebook.json` is replaced by its last good copy.
     pub fn open(path: &Path) -> Result<Self, String> {
-        let data = std::fs::read(Self::file(path)).map_err(|e| e.to_string())?;
+        let main = Self::file(path);
+        match Self::open_from(path, &main) {
+            Ok(nb) => Ok(nb),
+            Err(e) => {
+                let bak = Self::meta_backup_file(path);
+                let mut nb = Self::open_from(path, &bak).map_err(|_| e.clone())?;
+                if main.exists() {
+                    let _ = std::fs::copy(&main, path.join(format!("notebook.json.damaged-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"))));
+                }
+                let _ = std::fs::copy(&bak, &main);
+                nb.recovered = Some(format!("Файл записной книжки «{}» был повреждён ({e}). Восстановлен из резервного файла; повреждённый файл сохранён рядом.", nb.meta.name));
+                Ok(nb)
+            }
+        }
+    }
+
+    fn open_from(path: &Path, file: &Path) -> Result<Self, String> {
+        let data = std::fs::read(file).map_err(|e| e.to_string())?;
         let file: NotebookFile = serde_json::from_slice(&data).map_err(|e| e.to_string())?;
+        if file.meta.is_none() && file.enc.is_none() {
+            return Err("пустой файл блокнота".into());
+        }
         let sealed = file.meta.is_none();
         let meta = file.meta.unwrap_or_else(|| {
             let mut m = NotebookMeta::new(
@@ -93,6 +122,7 @@ impl Notebook {
             keys: HashMap::new(),
             sealed,
             dirty: false,
+            recovered: None,
         })
     }
 
@@ -139,7 +169,18 @@ impl Notebook {
             _ => NotebookFile { format: 1, lock: None, meta: Some(self.meta.clone()), enc: None },
         };
         if let Ok(b) = serde_json::to_vec_pretty(&file) {
-            atomic_write(&Self::file(&self.path), &b);
+            let main = Self::file(&self.path);
+            // Keep the previous good state aside (refreshed at most every 5 minutes).
+            let bak = Self::meta_backup_file(&self.path);
+            let bak_age = std::fs::metadata(&bak).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map(|d| d.as_secs());
+            if bak_age.is_none_or(|a| a > 300) {
+                if let Ok(old) = std::fs::read(&main) {
+                    if old != b && serde_json::from_slice::<NotebookFile>(&old).is_ok() {
+                        atomic_write(&bak, &old);
+                    }
+                }
+            }
+            atomic_write(&main, &b);
         }
     }
 
@@ -321,6 +362,19 @@ impl Notebook {
     pub fn load_version(&self, page: Id, path: &Path) -> Option<Page> {
         let data = std::fs::read(path).ok()?;
         decode_page(&data, self.key_for_page(page)).ok()
+    }
+
+    /// Newest readable copy of a page from its version history.
+    pub fn page_from_versions(&self, page: Id) -> Option<(Page, chrono::NaiveDateTime)> {
+        self.list_versions(page).into_iter().find_map(|(t, p)| self.load_version(page, &p).map(|pg| (pg, t)))
+    }
+
+    /// Moves a damaged page file aside so it is never silently overwritten.
+    pub fn keep_damaged_page(&self, page: Id) {
+        let path = self.page_path(page);
+        if path.exists() {
+            let _ = std::fs::copy(&path, path.with_extension(format!("page.damaged-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"))));
+        }
     }
 
     // ---- shared folder locks ----------------------------------------------
@@ -631,27 +685,157 @@ pub fn unzip_to(data: &[u8], dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn backup_notebook(nb_path: &Path, name: &str, dir: &Path, keep: u32, key: Option<&Key>) -> Result<PathBuf, String> {
+pub struct BackupOpts {
+    pub dir: PathBuf,
+    pub mirror: Option<PathBuf>,
+    /// Always keep this many newest copies.
+    pub recent: u32,
+    /// Then one copy per day for this many days...
+    pub days: u32,
+    /// ...and one per week for this many weeks.
+    pub weeks: u32,
+    pub key: Option<Key>,
+}
+
+pub struct BackupDone {
+    pub file: PathBuf,
+    pub size: u64,
+    pub mirror_error: Option<String>,
+}
+
+/// Cheap change detector: names, sizes and write times of the notebook files.
+pub fn fingerprint(nb_path: &Path) -> u64 {
+    fn walk(base: &Path, dir: &Path, h: &mut u64) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let mut entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        entries.sort();
+        for p in entries {
+            let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+            if rel.starts_with("locks") || rel.starts_with("versions") || rel.ends_with("tmp~") || rel.ends_with(".bak") || rel.contains(".damaged-") {
+                continue;
+            }
+            if p.is_dir() {
+                walk(base, &p, h);
+            } else if let Ok(m) = std::fs::metadata(&p) {
+                let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos() as u64).unwrap_or(0);
+                for v in [fnv1a(rel.as_bytes()), m.len(), t] {
+                    *h = (*h ^ v).wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+    }
+    let mut h = 0xcbf29ce484222325;
+    walk(nb_path, nb_path, &mut h);
+    h
+}
+
+/// Checks that an archive opens, has a readable notebook file and every entry decompresses.
+pub fn verify_archive(data: &[u8]) -> Result<usize, String> {
+    let mut za = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| format!("архив не читается: {e}"))?;
+    let mut has_meta = false;
+    for i in 0..za.len() {
+        let mut f = za.by_index(i).map_err(|e| e.to_string())?;
+        let name = f.name().to_owned();
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf).map_err(|e| format!("{name}: {e}"))?;
+        if name == "notebook.json" {
+            serde_json::from_slice::<NotebookFile>(&buf).map_err(|e| format!("notebook.json: {e}"))?;
+            has_meta = true;
+        }
+    }
+    if !has_meta {
+        return Err("в архиве нет notebook.json".into());
+    }
+    Ok(za.len())
+}
+
+fn backup_folder(dir: &Path, name: &str) -> PathBuf {
+    dir.join(sanitize(name))
+}
+
+/// Backs a notebook up unless nothing changed since the last copy (`force` skips that check).
+/// Returns `Ok(None)` when skipped.
+pub fn backup_notebook(nb_path: &Path, name: &str, o: &BackupOpts, force: bool) -> Result<Option<BackupDone>, String> {
+    let folder = backup_folder(&o.dir, name);
+    let state = folder.join(".state");
+    let fp = fingerprint(nb_path);
+    let last = std::fs::read_to_string(&state).ok().and_then(|s| s.trim().parse::<u64>().ok());
+    if !force && last == Some(fp) && !list_backups(&o.dir, name).is_empty() {
+        return Ok(None);
+    }
     let data = zip_dir(nb_path, false).map_err(|e| e.to_string())?;
-    let (data, ext) = match key {
+    verify_archive(&data)?;
+    let (data, ext) = match &o.key {
         Some(k) => (crypto::encrypt(k, &data), "nnbak"),
         None => (data, "zip"),
     };
-    let folder = dir.join(sanitize(name));
-    let file = folder.join(format!("{}.{ext}", chrono::Local::now().format("%Y%m%d-%H%M%S")));
-    if !atomic_write(&file, &data) {
-        return Err("Не удалось записать резервную копию".into());
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let write_to = |folder: &Path| -> Result<PathBuf, String> {
+        let mut file = folder.join(format!("{stamp}.{ext}"));
+        let mut n = 1;
+        while file.exists() {
+            n += 1;
+            file = folder.join(format!("{stamp}-{n}.{ext}"));
+        }
+        if !atomic_write(&file, &data) {
+            return Err(format!("не удалось записать {}", file.display()));
+        }
+        // Read back and compare: catches a full disk or a failing drive.
+        match std::fs::read(&file) {
+            Ok(back) if fnv1a(&back) == fnv1a(&data) && back.len() == data.len() => Ok(file),
+            _ => {
+                let _ = std::fs::remove_file(&file);
+                Err(format!("копия {} не прошла проверку после записи", file.display()))
+            }
+        }
+    };
+    let file = write_to(&folder)?;
+    prune_backups(&folder, o);
+    let mirror_error = o.mirror.as_ref().and_then(|m| {
+        let mf = backup_folder(m, name);
+        match write_to(&mf) {
+            Ok(_) => {
+                prune_backups(&mf, o);
+                None
+            }
+            Err(e) => Some(e),
+        }
+    });
+    atomic_write(&state, fp.to_string().as_bytes());
+    Ok(Some(BackupDone { file, size: data.len() as u64, mirror_error }))
+}
+
+fn backup_time(p: &Path) -> Option<chrono::NaiveDateTime> {
+    let stem = p.file_stem()?.to_string_lossy().to_string();
+    chrono::NaiveDateTime::parse_from_str(stem.get(..15)?, "%Y%m%d-%H%M%S").ok()
+}
+
+/// Tiered retention: the newest `recent` copies, everything from the last day,
+/// one per day for `days` days and one per week for `weeks` weeks.
+pub fn prune_backups(folder: &Path, o: &BackupOpts) {
+    let mut list: Vec<(chrono::NaiveDateTime, PathBuf)> = std::fs::read_dir(folder)
+        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "zip" || x == "nnbak")).filter_map(|p| Some((backup_time(&p)?, p))).collect())
+        .unwrap_or_default();
+    list.sort_by(|a, b| b.0.cmp(&a.0));
+    let now = now();
+    let mut days_seen = std::collections::HashSet::new();
+    let mut weeks_seen = std::collections::HashSet::new();
+    for (i, (t, p)) in list.iter().enumerate() {
+        let age = now - *t;
+        let day = t.date();
+        let week = { use chrono::Datelike; (t.iso_week().year(), t.iso_week().week()) };
+        let keep = i < o.recent.max(1) as usize
+            || age < chrono::Duration::hours(24)
+            || (age < chrono::Duration::days(o.days as i64) && days_seen.insert(day))
+            || (age < chrono::Duration::weeks(o.weeks as i64) && weeks_seen.insert(week));
+        if !keep {
+            let _ = std::fs::remove_file(p);
+        }
     }
-    let mut list = list_backups(dir, name);
-    list.sort_by(|a, b| b.cmp(a));
-    for old in list.iter().skip(keep.max(1) as usize) {
-        let _ = std::fs::remove_file(old);
-    }
-    Ok(file)
 }
 
 pub fn list_backups(dir: &Path, name: &str) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = std::fs::read_dir(dir.join(sanitize(name)))
+    let mut v: Vec<PathBuf> = std::fs::read_dir(backup_folder(dir, name))
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.path())
@@ -664,13 +848,89 @@ pub fn list_backups(dir: &Path, name: &str) -> Vec<PathBuf> {
     v
 }
 
-pub fn restore_backup(backup: &Path, nb_path: &Path, key: Option<&Key>) -> Result<(), String> {
+/// Copies `settings.json` into the backup folder when it changed (keeps 60 copies).
+pub fn backup_settings(dir: &Path, settings_file: &Path) {
+    let Ok(data) = std::fs::read(settings_file) else { return };
+    let folder = dir.join("_Настройки программы");
+    let mut list: Vec<PathBuf> = std::fs::read_dir(&folder).map(|rd| rd.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    list.sort();
+    if list.last().and_then(|p| std::fs::read(p).ok()).is_some_and(|last| last == data) {
+        return;
+    }
+    atomic_write(&folder.join(format!("{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S"))), &data);
+    list.reverse();
+    for old in list.iter().skip(59) {
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+/// Reads a whole backup (decrypting it if needed).
+pub fn read_backup(backup: &Path, key: Option<&Key>) -> Result<Vec<u8>, String> {
     let data = std::fs::read(backup).map_err(|e| e.to_string())?;
-    let data = if crypto::is_encrypted(&data) {
-        crypto::decrypt(key.ok_or("Нужен пароль резервных копий")?, &data).ok_or("Неверный пароль")?
+    if crypto::is_encrypted(&data) {
+        crypto::decrypt(key.ok_or("Нужен пароль резервных копий")?, &data).ok_or_else(|| "Неверный пароль резервных копий".to_string())
     } else {
-        data
-    };
+        Ok(data)
+    }
+}
+
+/// One file from a backup archive.
+pub fn backup_file(archive: &[u8], rel: &str) -> Option<Vec<u8>> {
+    let mut za = zip::ZipArchive::new(std::io::Cursor::new(archive)).ok()?;
+    let mut f = za.by_name(rel).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Sections and pages stored in a backup (unencrypted notebooks only).
+pub fn backup_pages(archive: &[u8]) -> Result<Vec<(String, PageMeta)>, String> {
+    let meta = backup_file(archive, "notebook.json").ok_or("в копии нет notebook.json")?;
+    let file: NotebookFile = serde_json::from_slice(&meta).map_err(|e| e.to_string())?;
+    let meta = file.meta.ok_or("блокнот в копии защищён паролем — восстановите его целиком")?;
+    Ok(meta.sections().iter().flat_map(|s| s.pages.iter().map(move |p| (s.name.clone(), p.clone()))).collect())
+}
+
+/// Newest readable copy of a page across the backups (primary folder, then mirror).
+pub fn page_from_backups(dirs: &[PathBuf], name: &str, page: Id, page_key: Option<&Key>, backup_key: Option<&Key>) -> Option<(Page, PathBuf)> {
+    let rel = format!("pages/{page}.page");
+    let mut all: Vec<PathBuf> = dirs.iter().flat_map(|d| list_backups(d, name)).collect();
+    all.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    for b in all {
+        let Ok(archive) = read_backup(&b, backup_key) else { continue };
+        if let Some(data) = backup_file(&archive, &rel) {
+            if let Ok(p) = decode_page(&data, page_key) {
+                return Some((p, b));
+            }
+        }
+    }
+    None
+}
+
+/// Restores `notebook.json` from the newest backup that has a readable one.
+pub fn meta_from_backups(dirs: &[PathBuf], name: &str, nb_path: &Path, backup_key: Option<&Key>) -> Option<PathBuf> {
+    let mut all: Vec<PathBuf> = dirs.iter().flat_map(|d| list_backups(d, name)).collect();
+    all.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    for b in all {
+        let Ok(archive) = read_backup(&b, backup_key) else { continue };
+        if let Some(meta) = backup_file(&archive, "notebook.json") {
+            if serde_json::from_slice::<NotebookFile>(&meta).is_ok() {
+                let main = Notebook::file(nb_path);
+                if main.exists() {
+                    let _ = std::fs::copy(&main, nb_path.join(format!("notebook.json.damaged-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"))));
+                }
+                if atomic_write(&main, &meta) {
+                    return Some(b);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn restore_backup(backup: &Path, nb_path: &Path, key: Option<&Key>) -> Result<(), String> {
+    let data = read_backup(backup, key)?;
+    verify_archive(&data)?;
     // Keep the current state aside so a failed restore loses nothing.
     let aside = nb_path.with_extension(format!("before-restore-{}", chrono::Local::now().format("%Y%m%d%H%M%S")));
     std::fs::rename(nb_path, &aside).map_err(|e| e.to_string())?;
@@ -681,5 +941,121 @@ pub fn restore_backup(backup: &Path, nb_path: &Path, key: Option<&Key>) -> Resul
             let _ = std::fs::rename(&aside, nb_path);
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nn-safety-{tag}-{}", new_id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn sample(root: &Path) -> (Notebook, Id) {
+        let mut nb = Notebook::create(root, "Тест").unwrap();
+        let mut sec = Section::new("Раздел", 1);
+        let pm = PageMeta::new("Страница", "a");
+        let mut page = Page::new(pm.id);
+        page.ink_text = "важный текст".into();
+        assert!(write_page(&nb.page_path(pm.id), &page, None));
+        let id = pm.id;
+        sec.pages.push(pm);
+        nb.meta.tree.push(Node::Section(sec));
+        nb.save_meta();
+        (nb, id)
+    }
+
+    fn opts(dir: &Path, mirror: Option<PathBuf>) -> BackupOpts {
+        BackupOpts { dir: dir.to_owned(), mirror, recent: 3, days: 30, weeks: 4, key: None }
+    }
+
+    #[test]
+    fn backup_skip_verify_mirror_and_restore_page() {
+        let root = tmp("b");
+        let (nb, id) = sample(&root.join("nb"));
+        let o = opts(&root.join("bk"), Some(root.join("mirror")));
+        let first = backup_notebook(&nb.path, "Тест", &o, false).unwrap().expect("first copy");
+        assert!(first.mirror_error.is_none());
+        // Nothing changed: no new copy.
+        assert!(backup_notebook(&nb.path, "Тест", &o, false).unwrap().is_none());
+        assert_eq!(list_backups(&o.dir, "Тест").len(), 1);
+        assert_eq!(list_backups(&root.join("mirror"), "Тест").len(), 1);
+        // The archive is readable and the page can be taken back out of it.
+        let a = read_backup(&first.file, None).unwrap();
+        assert!(verify_archive(&a).is_ok());
+        assert_eq!(backup_pages(&a).unwrap().len(), 1);
+        // Damage the page file: it comes back from the backup.
+        std::fs::write(nb.page_path(id), b"{broken").unwrap();
+        assert!(nb.load_page(id).is_err());
+        let (p, _) = page_from_backups(&[o.dir.clone()], "Тест", id, None, None).unwrap();
+        assert_eq!(p.ink_text, "важный текст");
+        // A change makes a new copy.
+        std::fs::write(nb.page_path(id), encode_page(&p, None)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(backup_notebook(&nb.path, "Тест", &o, false).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn damaged_archive_is_rejected() {
+        assert!(verify_archive(b"not a zip").is_err());
+    }
+
+    #[test]
+    fn notebook_file_recovers_from_bak() {
+        let root = tmp("m");
+        let (mut nb, _) = sample(&root.join("nb"));
+        // Force the .bak to be refreshed, then corrupt the main file.
+        let _ = std::fs::remove_file(Notebook::meta_backup_file(&nb.path));
+        nb.meta.name = "Тест 2".into();
+        nb.save_meta();
+        assert!(Notebook::meta_backup_file(&nb.path).exists());
+        std::fs::write(Notebook::file(&nb.path), b"\0\0garbage").unwrap();
+        let back = Notebook::open(&nb.path).unwrap();
+        assert!(back.recovered.is_some());
+        assert_eq!(back.meta.sections().len(), 1);
+        // The damaged file is kept next to it.
+        assert!(std::fs::read_dir(&nb.path).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains("damaged")));
+        // And notebook.json was repaired on disk.
+        assert!(Notebook::open(&nb.path).unwrap().recovered.is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn notebook_file_recovers_from_backup() {
+        let root = tmp("r");
+        let (nb, _) = sample(&root.join("nb"));
+        let o = opts(&root.join("bk"), None);
+        backup_notebook(&nb.path, "nb", &o, true).unwrap();
+        std::fs::write(Notebook::file(&nb.path), b"garbage").unwrap();
+        let _ = std::fs::remove_file(Notebook::meta_backup_file(&nb.path));
+        assert!(Notebook::open(&nb.path).is_err());
+        assert!(meta_from_backups(&[o.dir.clone()], "nb", &nb.path, None).is_some());
+        assert_eq!(Notebook::open(&nb.path).unwrap().meta.sections().len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn retention_keeps_recent_daily_weekly() {
+        let root = tmp("p");
+        let folder = root.join("x");
+        std::fs::create_dir_all(&folder).unwrap();
+        let now = now();
+        // 4 copies a day for 60 days.
+        for d in 0..60 {
+            for h in [1, 7, 13, 19] {
+                let t = now - chrono::Duration::days(d) - chrono::Duration::hours(h);
+                std::fs::write(folder.join(format!("{}.zip", t.format("%Y%m%d-%H%M%S"))), b"z").unwrap();
+            }
+        }
+        let o = BackupOpts { dir: root.clone(), mirror: None, recent: 3, days: 30, weeks: 8, key: None };
+        prune_backups(&folder, &o);
+        let left = std::fs::read_dir(&folder).unwrap().count();
+        // Last 24 h (4) + one per day for the rest of 30 days (~29) + a few weekly ones.
+        assert!((33..=45).contains(&left), "left {left}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

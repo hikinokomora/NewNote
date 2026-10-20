@@ -220,9 +220,16 @@ pub struct Settings {
     // Data
     pub autosave_secs: u32,
     pub backup_enabled: bool,
-    pub backup_hours: u32,
-    pub backup_keep: u32,
+    /// Minutes between automatic copies (made only when something changed).
+    pub backup_minutes: u32,
+    /// Retention: newest copies kept in any case, then daily and weekly copies.
+    pub backup_recent: u32,
+    pub backup_days: u32,
+    pub backup_weeks: u32,
     pub backup_dir: PathBuf,
+    /// Second place for every copy: another drive, a USB stick or a synced folder.
+    pub backup_mirror: Option<PathBuf>,
+    pub backup_on_exit: bool,
     pub backup_encrypt: bool,
     pub trash_days: u32,
     pub version_minutes: u32,
@@ -320,8 +327,12 @@ impl Default for Settings {
             auto_lists: true,
             autosave_secs: 3,
             backup_enabled: true,
-            backup_hours: 24,
-            backup_keep: 7,
+            backup_minutes: 30,
+            backup_recent: 20,
+            backup_days: 30,
+            backup_weeks: 26,
+            backup_mirror: None,
+            backup_on_exit: true,
             backup_dir: app_data_dir().join("Backups"),
             backup_encrypt: false,
             trash_days: 60,

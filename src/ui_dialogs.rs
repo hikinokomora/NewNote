@@ -169,7 +169,7 @@ fn body(app: &mut App, ui: &mut Ui, ctx: &Context, d: &mut Dialog) -> Res {
                         } else if text != confirm {
                             *error = "Пароли не совпадают".into();
                         } else if let Some(ni) = app.notebooks.iter().position(|n| n.meta.section(sid).is_some()) {
-                            app.save_all();
+                            app.safety_backup(ni, "перед защитой раздела");
                             app.notebooks[ni].lock_section(sid, text);
                             app.set_status("Раздел защищён паролем");
                             return Res::Close;
@@ -177,7 +177,7 @@ fn body(app: &mut App, ui: &mut Ui, ctx: &Context, d: &mut Dialog) -> Res {
                     }
                     PwTarget::SetNotebook(ni) => {
                         if text.is_empty() && confirm.is_empty() {
-                            app.save_all();
+                            app.safety_backup(ni, "перед снятием пароля");
                             app.notebooks[ni].set_password(None);
                             app.set_status("Пароль блокнота снят");
                             return Res::Close;
@@ -186,7 +186,7 @@ fn body(app: &mut App, ui: &mut Ui, ctx: &Context, d: &mut Dialog) -> Res {
                         } else if text != confirm {
                             *error = "Пароли не совпадают".into();
                         } else {
-                            app.save_all();
+                            app.safety_backup(ni, "перед установкой пароля");
                             app.notebooks[ni].set_password(Some(text));
                             app.set_status("Блокнот защищён паролем");
                             return Res::Close;
@@ -536,6 +536,7 @@ fn body(app: &mut App, ui: &mut Ui, ctx: &Context, d: &mut Dialog) -> Res {
                         ConfirmAction::DeleteGroup(g) => app.delete_group(g),
                         ConfirmAction::EmptyTrash => {
                             if let Some(ni) = app.cur_nb {
+                                app.safety_backup(ni, "перед очисткой корзины");
                                 let entries: Vec<TrashEntry> = app.notebooks[ni].meta.trash.drain(..).collect();
                                 for t in &entries {
                                     app.notebooks[ni].delete_trash_files(t);
@@ -695,29 +696,130 @@ fn trash_ui(app: &mut App, ui: &mut Ui) -> Res {
 fn backups_ui(app: &mut App, ui: &mut Ui) -> Res {
     let Some(ni) = app.cur_nb else { return Res::Close };
     let name = app.notebooks[ni].meta.name.clone();
-    ui.label(format!("Блокнот «{name}»"));
-    ui.label(RichText::new(format!("Папка: {}", app.settings.backup_dir.display())).small().weak());
-    if ui.button("Создать копию сейчас").clicked() {
-        app.run_backups_now();
+    let warn = egui::Color32::from_rgb(220, 140, 0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("Записная книжка «{name}»")).strong());
+        if ui.button("Создать копию сейчас").clicked() {
+            app.run_backups_now();
+        }
+        if ui.button("Открыть папку").clicked() {
+            let _ = std::fs::create_dir_all(&app.settings.backup_dir);
+            crate::winapi::shell_open(&app.settings.backup_dir.to_string_lossy());
+        }
+        if ui.button("Настройки…").clicked() {
+            app.dialogs.push(Dialog::Settings(3));
+        }
+    });
+    if !app.settings.backup_enabled {
+        ui.label(RichText::new("Автоматические копии выключены").color(warn));
     }
-    let list = crate::storage::list_backups(&app.settings.backup_dir, &name);
-    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+    if app.settings.backup_mirror.is_none() {
+        ui.label(RichText::new("Совет: задайте вторую папку на другом диске или флешке — тогда копии переживут и поломку диска.").small().color(warn));
+    }
+    let running = app.backups_running.lock().map(|r| !r.is_empty()).unwrap_or(false);
+    if running {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("Идёт резервное копирование…");
+        });
+    }
+    if let Some(l) = app.backup_log.iter().find(|l| l.name == name) {
+        match &l.result {
+            Ok(t) => ui.label(RichText::new(format!("Последняя копия: {} — {t}", l.time.format("%d.%m.%Y %H:%M"))).small()),
+            Err(e) => ui.label(RichText::new(format!("Ошибка {}: {e}", l.time.format("%d.%m.%Y %H:%M"))).small().color(egui::Color32::from_rgb(220, 60, 60))),
+        };
+    }
+    ui.separator();
+    // Copies from both folders, newest first.
+    let mut list: Vec<(std::path::PathBuf, bool)> = crate::storage::list_backups(&app.settings.backup_dir, &name).into_iter().map(|p| (p, false)).collect();
+    if let Some(m) = &app.settings.backup_mirror {
+        list.extend(crate::storage::list_backups(m, &name).into_iter().map(|p| (p, true)));
+    }
+    list.sort_by(|a, b| b.0.file_name().cmp(&a.0.file_name()));
+    let mut browse: Option<std::path::PathBuf> = None;
+    egui::ScrollArea::vertical().id_salt("backup_list").max_height(220.0).show(ui, |ui| {
         if list.is_empty() {
             ui.label(RichText::new("Резервных копий пока нет").weak());
         }
-        for p in list {
+        for (p, mirror) in &list {
+            let when = p
+                .file_stem()
+                .and_then(|s| chrono::NaiveDateTime::parse_from_str(s.to_string_lossy().get(..15)?, "%Y%m%d-%H%M%S").ok())
+                .map(|t| t.format("%d.%m.%Y  %H:%M").to_string())
+                .unwrap_or_else(|| p.file_name().unwrap_or_default().to_string_lossy().to_string());
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            let selected = app.backup_view.as_ref().is_some_and(|v| &v.0 == p);
             ui.horizontal(|ui| {
-                let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                ui.label(format!("{} · {}", p.file_name().unwrap_or_default().to_string_lossy(), crate::storage::human_size(size)));
-                if ui.button("Восстановить").clicked() {
+                ui.label(RichText::new(when).monospace());
+                ui.label(RichText::new(crate::storage::human_size(size)).weak());
+                if *mirror {
+                    ui.label(RichText::new("вторая папка").small().weak());
+                }
+                if ui.selectable_label(selected, "Страницы…").on_hover_text("Вернуть отдельные страницы из этой копии").clicked() {
+                    browse = Some(p.clone());
+                }
+                if ui.button("Восстановить блокнот").on_hover_text("Вернуть всю записную книжку к состоянию этой копии").clicked() {
                     app.dialogs.push(Dialog::Confirm {
-                        text: "Восстановить блокнот из этой копии? Текущее состояние будет сохранено рядом в папке «before-restore».".into(),
+                        text: "Вернуть всю записную книжку к состоянию этой копии? Текущее состояние не удаляется — оно будет сохранено рядом в папке «…before-restore…».".into(),
                         action: ConfirmAction::RestoreBackup(p.clone()),
                     });
                 }
             });
         }
     });
+    if let Some(p) = browse {
+        if app.backup_view.as_ref().is_some_and(|v| v.0 == p) {
+            app.backup_view = None;
+        } else {
+            let pages = crate::storage::read_backup(&p, app.backup_key.as_ref()).and_then(|a| crate::storage::backup_pages(&a));
+            app.backup_view = Some((p, pages, String::new()));
+        }
+    }
+    let mut restore: Option<(std::path::PathBuf, PageMeta)> = None;
+    if let Some((path, pages, filter)) = &mut app.backup_view {
+        ui.separator();
+        match pages {
+            Err(e) => {
+                ui.label(RichText::new(e.as_str()).color(warn));
+            }
+            Ok(pages) => {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Страниц в копии: {}", pages.len()));
+                    ui.add(egui::TextEdit::singleline(filter).hint_text("Найти страницу").desired_width(220.0));
+                });
+                let f = filter.to_lowercase();
+                egui::ScrollArea::vertical().id_salt("backup_pages").max_height(220.0).show(ui, |ui| {
+                    for (sec, pm) in pages.iter().filter(|(s, pm)| f.is_empty() || pm.title.to_lowercase().contains(&f) || s.to_lowercase().contains(&f)) {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(sec.as_str()).weak());
+                            ui.label(if pm.title.is_empty() { "Без заголовка" } else { pm.title.as_str() });
+                            ui.label(RichText::new(pm.modified.format("%d.%m.%Y %H:%M").to_string()).small().weak());
+                            if ui.button("Вернуть копию").on_hover_text("Добавить эту страницу из копии рядом с текущими — ничего не заменяется").clicked() {
+                                restore = Some((path.clone(), pm.clone()));
+                            }
+                        });
+                    }
+                });
+            }
+        }
+    }
+    if let Some((b, pm)) = restore {
+        app.restore_page_from_backup(&b, &pm);
+    }
+    if !app.backup_log.is_empty() {
+        ui.separator();
+        egui::CollapsingHeader::new("Журнал резервного копирования").show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("backup_log").max_height(140.0).show(ui, |ui| {
+                for l in &app.backup_log {
+                    let (t, c) = match &l.result {
+                        Ok(t) => (format!("✔ {} · {} · {t}", l.time.format("%d.%m %H:%M"), l.name), ui.visuals().text_color()),
+                        Err(e) => (format!("✖ {} · {} · {e}", l.time.format("%d.%m %H:%M"), l.name), egui::Color32::from_rgb(220, 60, 60)),
+                    };
+                    ui.label(RichText::new(t).small().color(c));
+                }
+            });
+        });
+    }
     Res::Keep
 }
 
@@ -910,8 +1012,12 @@ fn settings_ui(app: &mut App, ui: &mut Ui, ctx: &Context, tab: &mut usize) -> Re
         3 => {
             save |= ui.add(egui::Slider::new(&mut s.autosave_secs, 1..=60).text("Автосохранение, сек")).changed();
             save |= ui.checkbox(&mut s.backup_enabled, "Автоматические резервные копии").changed();
-            save |= ui.add(egui::Slider::new(&mut s.backup_hours, 1..=168).text("Частота, часов")).changed();
-            save |= ui.add(egui::Slider::new(&mut s.backup_keep, 1..=100).text("Хранить копий")).changed();
+            save |= ui.add(egui::Slider::new(&mut s.backup_minutes, 5..=1440).logarithmic(true).text("Проверять изменения каждые, мин")).changed();
+            save |= ui.checkbox(&mut s.backup_on_exit, "Копия при выходе из программы").changed();
+            ui.label(RichText::new("Копия создаётся, только если в блокноте что-то изменилось, и проверяется после записи.").small().weak());
+            save |= ui.add(egui::Slider::new(&mut s.backup_recent, 1..=200).text("Последних копий хранить всегда")).changed();
+            save |= ui.add(egui::Slider::new(&mut s.backup_days, 1..=365).text("По одной в день, дней")).changed();
+            save |= ui.add(egui::Slider::new(&mut s.backup_weeks, 0..=260).text("По одной в неделю, недель")).changed();
             ui.horizontal(|ui| {
                 ui.label(format!("Папка: {}", s.backup_dir.display()));
                 if ui.button("Изменить…").clicked() {
@@ -919,6 +1025,22 @@ fn settings_ui(app: &mut App, ui: &mut Ui, ctx: &Context, tab: &mut usize) -> Re
                         s.backup_dir = p;
                         save = true;
                     }
+                }
+            });
+            ui.horizontal(|ui| {
+                match &s.backup_mirror {
+                    Some(m) => ui.label(format!("Вторая папка: {}", m.display())),
+                    None => ui.label(RichText::new("Вторая папка не задана — копии лежат на том же диске").color(egui::Color32::from_rgb(220, 140, 0))),
+                };
+                if ui.button("Выбрать…").on_hover_text("Другой диск, флешка или папка, которая синхронизируется с облаком").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().set_title("Вторая папка для резервных копий").pick_folder() {
+                        s.backup_mirror = Some(p);
+                        save = true;
+                    }
+                }
+                if s.backup_mirror.is_some() && ui.button("Убрать").clicked() {
+                    s.backup_mirror = None;
+                    save = true;
                 }
             });
             save |= ui.checkbox(&mut s.backup_encrypt, "Шифровать резервные копии паролем").changed();

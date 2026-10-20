@@ -19,13 +19,13 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             .exact_size(34.0)
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(p.title_bg))
-            .show(ui, |ui| crate::chrome::title_bar(app, ui));
+            .show(ui, |ui| crate::app::timed("title", || crate::chrome::title_bar(app, ui)));
     }
     if !hide {
         egui::Panel::top("ribbon")
             .frame(egui::Frame::new().fill(p.ribbon_bg).inner_margin(egui::Margin { left: 0, right: 0, top: 2, bottom: 2 }).stroke(egui::Stroke::new(1.0, p.border)))
             .show_separator_line(false)
-            .show(ui, |ui| crate::chrome::ribbon(app, ui));
+            .show(ui, |ui| crate::app::timed("ribbon", || crate::chrome::ribbon(app, ui)));
     }
     if !app.presentation && app.settings.status_bar {
         egui::Panel::bottom("status")
@@ -44,12 +44,12 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
             let nav_frame = egui::Frame::new().fill(p.nav_bg).inner_margin(egui::Margin::symmetric(0, 0));
             match app.rail {
                 RailMode::Notebooks => {
-                    egui::Panel::left("nav").resizable(true).default_size(240.0).show_separator_line(false).frame(nav_frame).show(ui, |ui| nav_tree(app, ui));
+                    egui::Panel::left("nav").resizable(true).default_size(240.0).show_separator_line(false).frame(nav_frame).show(ui, |ui| crate::app::timed("nav", || nav_tree(app, ui)));
                     let pages_frame = egui::Frame::new().fill(p.pages_bg);
                     if app.settings.pages_right {
-                        egui::Panel::right("pages").resizable(true).default_size(230.0).show_separator_line(false).frame(pages_frame).show(ui, |ui| page_list(app, ui));
+                        egui::Panel::right("pages").resizable(true).default_size(230.0).show_separator_line(false).frame(pages_frame).show(ui, |ui| crate::app::timed("pages", || page_list(app, ui)));
                     } else {
-                        egui::Panel::left("pages").resizable(true).default_size(230.0).show_separator_line(false).frame(pages_frame).show(ui, |ui| page_list(app, ui));
+                        egui::Panel::left("pages").resizable(true).default_size(230.0).show_separator_line(false).frame(pages_frame).show(ui, |ui| crate::app::timed("pages", || page_list(app, ui)));
                     }
                 }
                 RailMode::Search => {
@@ -71,7 +71,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
         if app.settings.sections_on_top && !hide {
             egui::Frame::new().fill(p.nav_bg).inner_margin(egui::Margin { left: 0, right: 0, top: 4, bottom: 0 }).show(ui, |ui| section_tabs(app, ui));
         }
-        central(app, ui, &ctx)
+        crate::app::timed("central", || central(app, ui, &ctx))
     });
     crate::ui_draw::pen_settings_window(app, &ctx);
     if !app.settings.status_bar {
@@ -1176,8 +1176,8 @@ fn nav_tree(app: &mut App, ui: &mut Ui) {
         let bottom = add_row_rect(ui);
         egui::ScrollArea::vertical().id_salt("nav_scroll").max_height(ui.available_height() - bottom.height()).auto_shrink([false, true]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            let tree_nodes = app.notebooks[ni].meta.tree.clone();
-            tree(ui, app, ni, &tree_nodes, &mut actions, 0);
+            let app = &*app;
+            tree(ui, app, ni, &app.notebooks[ni].meta.tree, &mut actions, 0);
         });
         if add_row(ui, bottom, "Добавить раздел", "Ctrl+T").clicked() {
             app.new_section();
@@ -1636,21 +1636,24 @@ fn page_list(app: &mut App, ui: &mut Ui) {
     if add_row(ui, bottom, "Добавить страницу", "Ctrl+N; Ctrl+Alt+Shift+N — подстраница").clicked() {
         app.new_page(false);
     }
-    let pages: Vec<PageMeta> = sorted_pages(&sec).into_iter().cloned().collect();
+    let pages: Vec<&PageMeta> = sorted_pages(&sec);
     let filter = app.page_filter.trim().to_lowercase();
     let details = app.settings.page_list_details;
-    // Page text for empty titles and the detailed view.
-    let snippets: std::collections::HashMap<Id, String> = {
+    // Page text for empty titles and the detailed view: derived once per index change.
+    let generation = app.index.generation();
+    if app.snippets.0 != generation {
         let entries = app.index.entries.read().unwrap();
-        pages
+        let map = entries
             .iter()
-            .filter_map(|pm| {
-                let e = entries.iter().find(|e| e.page == pm.id)?;
+            .map(|e| {
                 let body: String = e.text.lines().skip(1).map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
-                Some((pm.id, body.chars().take(140).collect()))
+                (e.page, body.chars().take(140).collect())
             })
-            .collect()
-    };
+            .collect();
+        drop(entries);
+        app.snippets = (generation, map);
+    }
+    let snippets = std::mem::take(&mut app.snippets.1);
     let mut open = None;
     let mut ops: Vec<(Id, &'static str)> = Vec::new();
     let mut reorder: Option<(Id, Id)> = None;
@@ -1681,6 +1684,12 @@ fn page_list(app: &mut App, ui: &mut Ui) {
             }
             let selected = app.cur_page == Some(pm.id);
             let h = if details { 54.0 } else { 34.0 };
+            // Rows outside the visible part of the list only take up space.
+            let w = ui.available_width();
+            if !ui.is_rect_visible(egui::Rect::from_min_size(ui.cursor().min, vec2(w, h))) {
+                ui.allocate_space(vec2(w, h));
+                continue;
+            }
             let drag_id = egui::Id::new(("pdrag", pm.id));
             let row = ui.dnd_drag_source(drag_id, PageDrag { page: pm.id }, |ui| ui.allocate_exact_size(vec2(ui.available_width(), h), egui::Sense::click()));
             let (rect, r) = row.inner;
@@ -1779,6 +1788,7 @@ fn page_list(app: &mut App, ui: &mut Ui) {
             });
         }
     });
+    app.snippets.1 = snippets;
     if let Some(pg) = open {
         app.open_page(Some(pg));
     }

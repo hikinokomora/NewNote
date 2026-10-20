@@ -2,7 +2,7 @@
 //! OCR text. Built in the background and updated on every save.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use chrono::NaiveDateTime;
@@ -37,6 +37,8 @@ pub struct Entry {
 pub struct Index {
     pub entries: Arc<RwLock<Vec<Entry>>>,
     pub building: Arc<AtomicBool>,
+    /// Bumped on every change, so views can cache what they derive from the entries.
+    pub generation: Arc<AtomicU64>,
 }
 
 pub struct PageSrc {
@@ -92,6 +94,7 @@ impl Index {
     pub fn rebuild(&self, sources: Vec<PageSrc>, ctx: egui::Context) {
         let entries = self.entries.clone();
         let building = self.building.clone();
+        let generation = self.generation.clone();
         building.store(true, Ordering::SeqCst);
         std::thread::Builder::new()
             .name("indexer".into())
@@ -105,6 +108,7 @@ impl Index {
                     out.push(entry_for(src, &page));
                 }
                 *entries.write().unwrap() = out;
+                generation.fetch_add(1, Ordering::SeqCst);
                 building.store(false, Ordering::SeqCst);
                 ctx.request_repaint();
             })
@@ -117,14 +121,25 @@ impl Index {
             Some(x) => *x = e,
             None => v.push(e),
         }
+        self.bump();
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn bump(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn remove(&self, page: Id) {
         self.entries.write().unwrap().retain(|e| e.page != page);
+        self.bump();
     }
 
     pub fn remove_notebook(&self, nb: &std::path::Path) {
         self.entries.write().unwrap().retain(|e| e.nb != nb);
+        self.bump();
     }
 }
 

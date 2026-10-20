@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 
 use egui::{Context, Key, KeyboardShortcut, Modifiers};
 
@@ -134,6 +134,21 @@ pub enum BgResult {
     Pdf { page: Id, at: [f32; 2], images: Result<Vec<Vec<u8>>, String>, nb: PathBuf },
     Summary(Vec<SummaryRow>),
     Math { page: Id, text: Result<String, String> },
+    Backup { nb: PathBuf, name: String, result: Result<Option<String>, String> },
+}
+
+/// One line of the backup journal shown in the backups dialog.
+#[derive(Clone)]
+pub struct BackupLog {
+    pub time: chrono::NaiveDateTime,
+    pub name: String,
+    pub result: Result<String, String>,
+}
+
+#[derive(Default, Clone)]
+struct SummaryCache {
+    pages: Arc<Mutex<HashMap<Id, (std::time::SystemTime, Vec<SummaryRow>)>>>,
+    running: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -185,6 +200,8 @@ pub struct App {
     pub search_filters: search::Filters,
     pub search_focus: bool,
     pub summary: Vec<SummaryRow>,
+    /// Tag / task rows per page file, reused while the file's write time is unchanged.
+    summary_cache: SummaryCache,
     pub summary_scope: search::Scope,
     pub summary_tag: Option<u32>,
     pub summary_state: usize,
@@ -203,6 +220,13 @@ pub struct App {
     pub print_preview: Vec<image::RgbaImage>,
     pub locked_by: Option<String>,
     pub backup_key: Option<CKey>,
+    /// Notebooks with a backup in progress.
+    pub backups_running: Arc<Mutex<HashSet<PathBuf>>>,
+    pub backup_log: Vec<BackupLog>,
+    /// Backups dialog: the copy being browsed, its pages (or why they cannot be listed) and a filter.
+    pub backup_view: Option<(PathBuf, Result<Vec<(String, PageMeta)>, String>, String)>,
+    /// For waking the UI from background threads.
+    repaint_ctx: egui::Context,
     pub helper_topic: String,
     pub helper_question: String,
     pub helper_out: Vec<(String, String)>,
@@ -225,6 +249,8 @@ pub struct App {
     pub page_filter: String,
     /// Page history for the back / forward buttons.
     pub hist_back: Vec<Id>,
+    /// Page previews for the page list, rebuilt when the search index changes.
+    pub snippets: (u64, std::collections::HashMap<Id, String>),
     pub hist_fwd: Vec<Id>,
     hist_nav: bool,
 }
@@ -274,6 +300,7 @@ impl App {
             search_filters: search::Filters::default(),
             search_focus: false,
             summary: Vec::new(),
+            summary_cache: Default::default(),
             summary_scope: search::Scope::All,
             summary_tag: None,
             summary_state: 0,
@@ -283,6 +310,10 @@ impl App {
             last_input: 0.0,
             last_version: HashMap::new(),
             last_backup_check: -1000.0,
+            backups_running: Default::default(),
+            backup_log: Vec::new(),
+            backup_view: None,
+            repaint_ctx: ctx.clone(),
             last_task_check: -1000.0,
             last_inbox_check: 0.0,
             last_lock_refresh: 0.0,
@@ -313,6 +344,7 @@ impl App {
             recent: Vec::new(),
             page_filter: String::new(),
             hist_back: Vec::new(),
+            snippets: (u64::MAX, Default::default()),
             hist_fwd: Vec::new(),
             hist_nav: false,
             settings,
@@ -326,10 +358,20 @@ impl App {
             _ => Ribbon::Home,
         };
         let paths = app.settings.open_notebooks.clone();
+        let mut recovered = Vec::new();
         for p in paths {
-            if let Ok(nb) = Notebook::open(&p) {
-                app.notebooks.push(nb);
+            match app.open_with_recovery(&p) {
+                Ok(mut nb) => {
+                    if let Some(r) = nb.recovered.take() {
+                        recovered.push(r);
+                    }
+                    app.notebooks.push(nb);
+                }
+                Err(e) => recovered.push(format!("Не удалось открыть «{}»: {e}. Папка не тронута — её можно восстановить из резервной копии (Файл → Резервные копии).", p.display())),
             }
+        }
+        if !recovered.is_empty() {
+            app.dialogs.push(Dialog::Report("Восстановление данных".into(), recovered));
         }
         if app.notebooks.is_empty() {
             app.create_first_notebook();
@@ -521,6 +563,16 @@ impl App {
         if !nb.page_accessible(pid) {
             return false;
         }
+        // A page that was saved before but whose file is gone: bring it back instead of
+        // showing an empty page that would then overwrite nothing but our chance to recover.
+        let lost = !nb.page_path(pid).exists() && nb.meta.page_meta(pid).is_some_and(|m| (m.modified - m.created).num_seconds() > 5);
+        if lost {
+            let title = nb.meta.page_meta(pid).map(|m| m.title.clone()).unwrap_or_default();
+            if let Some(source) = self.recover_page(ni, pid) {
+                self.dialogs.push(Dialog::Report("Страница восстановлена".into(), vec![format!("Файл страницы «{title}» пропал с диска."), format!("Страница восстановлена из {source}.")]));
+            }
+        }
+        let nb = &self.notebooks[ni];
         match nb.load_page(pid) {
             Ok(p) => {
                 self.pages.insert(pid, p);
@@ -542,10 +594,67 @@ impl App {
                 true
             }
             Err(e) => {
-                self.set_status(format!("Не удалось открыть страницу: {e}"));
-                false
+                // Damaged file: keep it aside and bring back the newest good copy.
+                let ni = self.nb_index_of_page(pid);
+                match ni.and_then(|ni| self.recover_page(ni, pid)) {
+                    Some(source) => {
+                        let title = ni.and_then(|ni| self.notebooks[ni].meta.page_meta(pid)).map(|m| m.title.clone()).unwrap_or_default();
+                        self.dialogs.push(Dialog::Report(
+                            "Страница восстановлена".into(),
+                            vec![format!("Файл страницы «{title}» был повреждён ({e})."), format!("Страница восстановлена из {source}."), "Повреждённый файл сохранён рядом с расширением .damaged.".into()],
+                        ));
+                        self.ensure_loaded(pid)
+                    }
+                    None => {
+                        self.set_status(format!("Не удалось открыть страницу: {e}. Резервной копии этой страницы нет."));
+                        false
+                    }
+                }
             }
         }
+    }
+
+    /// Backup folders: the main one and the mirror.
+    pub fn backup_dirs(&self) -> Vec<PathBuf> {
+        let mut v = vec![self.settings.backup_dir.clone()];
+        v.extend(self.settings.backup_mirror.clone());
+        v
+    }
+
+    fn open_with_recovery(&self, path: &std::path::Path) -> Result<Notebook, String> {
+        match Notebook::open(path) {
+            Ok(nb) => Ok(nb),
+            Err(e) if path.is_dir() => {
+                // No usable notebook.json even in the .bak: take it from the newest backup.
+                let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                let from = crate::storage::meta_from_backups(&self.backup_dirs(), &name, path, self.backup_key.as_ref()).ok_or(e.clone())?;
+                let mut nb = Notebook::open(path)?;
+                nb.recovered = Some(format!(
+                    "Файл записной книжки «{}» был повреждён ({e}). Структура восстановлена из резервной копии {}; страницы остались на месте.",
+                    nb.meta.name,
+                    from.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                Ok(nb)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Puts the newest readable copy of a page back in place (version history first,
+    /// then backups) and returns where it came from.
+    pub fn recover_page(&mut self, ni: usize, pid: Id) -> Option<String> {
+        let nb = &self.notebooks[ni];
+        let (page, source) = if let Some((p, t)) = nb.page_from_versions(pid) {
+            (p, format!("версии от {}", t.format("%d.%m.%Y %H:%M")))
+        } else {
+            let (p, b) = crate::storage::page_from_backups(&self.backup_dirs(), &nb.meta.name, pid, nb.key_for_page(pid), self.backup_key.as_ref())?;
+            (p, format!("резервной копии {}", b.file_name().unwrap_or_default().to_string_lossy()))
+        };
+        nb.keep_damaged_page(pid);
+        if !crate::storage::write_page(&nb.page_path(pid), &page, nb.key_for_page(pid)) {
+            return None;
+        }
+        Some(source)
     }
 
     pub fn mark_dirty(&mut self, pid: Id) {
@@ -1127,6 +1236,7 @@ impl App {
                 BgResult::Summary(rows) => {
                     self.summary = rows;
                 }
+                BgResult::Backup { nb: _, name, result } => self.note_backup(&name, result),
                 BgResult::Math { page, text } => match text {
                     Ok(t) => {
                         let expr: String = t.lines().collect::<Vec<_>>().join(" ").replace(['×', '•'], "*").replace(['—', '–'], "-").replace('÷', "/");
@@ -1161,11 +1271,35 @@ impl App {
         }
         let tx = self.bg_tx.clone();
         let ctx = ctx.clone();
+        let cache = self.summary_cache.clone();
+        if cache.running.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            // A pass is already running; it will deliver fresh rows.
+            return;
+        }
         std::thread::spawn(move || {
             let mut rows = Vec::new();
+            let mut map = cache.pages.lock().map(|m| m.clone()).unwrap_or_default();
+            let mut seen = std::collections::HashSet::new();
             for (nb, nb_name, sec, pm, path, key, mem) in jobs {
-                let page = mem.or_else(|| std::fs::read(&path).ok().and_then(|d| crate::storage::decode_page(&d, key.as_ref()).ok()));
+                seen.insert(pm.id);
+                // Unchanged files reuse their rows (titles may have changed, so refresh those).
+                let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                if mem.is_none() {
+                    if let (Some(t), Some((ct, cached))) = (mtime, map.get(&pm.id)) {
+                        if *ct == t {
+                            rows.extend(cached.iter().cloned().map(|mut r| {
+                                r.page_title = pm.title.clone();
+                                r.section = sec.clone();
+                                r.nb_name = nb_name.clone();
+                                r
+                            }));
+                            continue;
+                        }
+                    }
+                }
+                let page = mem.clone().or_else(|| std::fs::read(&path).ok().and_then(|d| crate::storage::decode_page(&d, key.as_ref()).ok()));
                 let Some(page) = page else { continue };
+                let first = rows.len();
                 for it in &page.items {
                     if it.tags.is_empty() && it.task.is_none() {
                         continue;
@@ -1184,7 +1318,15 @@ impl App {
                         modified: it.modified,
                     });
                 }
+                if let (Some(t), None) = (mtime, &mem) {
+                    map.insert(pm.id, (t, rows[first..].to_vec()));
+                }
             }
+            map.retain(|id, _| seen.contains(id));
+            if let Ok(mut m) = cache.pages.lock() {
+                *m = map;
+            }
+            cache.running.store(false, std::sync::atomic::Ordering::SeqCst);
             let _ = tx.send(BgResult::Summary(rows));
             ctx.request_repaint();
         });
@@ -1218,37 +1360,91 @@ impl App {
         }
     }
 
+    fn backup_opts(&self) -> Option<crate::storage::BackupOpts> {
+        let key = if self.settings.backup_encrypt { Some(self.backup_key.clone()?) } else { None };
+        Some(crate::storage::BackupOpts {
+            dir: self.settings.backup_dir.clone(),
+            mirror: self.settings.backup_mirror.clone(),
+            recent: self.settings.backup_recent,
+            days: self.settings.backup_days,
+            weeks: self.settings.backup_weeks,
+            key,
+        })
+    }
+
+    /// Periodic copies in the background: only notebooks that changed, at most
+    /// once per interval. `force` makes a copy of every notebook right now.
     pub fn run_backups(&mut self, force: bool) {
         if !self.settings.backup_enabled && !force {
             return;
         }
         self.save_all();
-        let dir = self.settings.backup_dir.clone();
-        let interval = self.settings.backup_hours.max(1) as u64 * 3600;
-        let key = if self.settings.backup_encrypt { self.backup_key.clone() } else { None };
-        if self.settings.backup_encrypt && key.is_none() {
+        let Some(opts) = self.backup_opts() else {
             if force {
                 self.dialogs.push(Dialog::BackupPassword(String::new()));
+            } else {
+                self.set_status("Резервные копии зашифрованы: введите пароль копий (Файл → Резервные копии), иначе они не создаются");
             }
             return;
-        }
-        let mut done = 0;
+        };
+        crate::storage::backup_settings(&opts.dir, &crate::settings::Settings::path());
+        let interval = self.settings.backup_minutes.max(5) as u64 * 60;
+        let opts = Arc::new(opts);
+        let mut started = 0;
         for nb in &self.notebooks {
-            let last = crate::storage::list_backups(&dir, &nb.meta.name).first().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
-            let stale = last.is_none_or(|t| t.elapsed().map(|e| e.as_secs() >= interval).unwrap_or(true));
-            if force || stale {
-                let (path, name, keep) = (nb.path.clone(), nb.meta.name.clone(), self.settings.backup_keep);
-                let d = dir.clone();
-                let k = key.clone();
-                std::thread::spawn(move || {
-                    let _ = crate::storage::backup_notebook(&path, &name, &d, keep, k.as_ref());
-                });
-                done += 1;
+            let last = crate::storage::list_backups(&opts.dir, &nb.meta.name).first().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
+            let due = last.is_none_or(|t| t.elapsed().map(|e| e.as_secs() >= interval).unwrap_or(true));
+            if !(force || due) {
+                continue;
             }
+            if !self.backups_running.lock().unwrap().insert(nb.path.clone()) {
+                continue;
+            }
+            let (path, name) = (nb.path.clone(), nb.meta.name.clone());
+            let (opts, tx, running, ctx) = (opts.clone(), self.bg_tx.clone(), self.backups_running.clone(), self.repaint_ctx.clone());
+            std::thread::Builder::new()
+                .name("backup".into())
+                .spawn(move || {
+                    let result = crate::storage::backup_notebook(&path, &name, &opts, force).map(|d| d.map(describe_backup));
+                    running.lock().unwrap().remove(&path);
+                    let _ = tx.send(BgResult::Backup { nb: path, name, result });
+                    ctx.request_repaint();
+                })
+                .ok();
+            started += 1;
         }
         if force {
-            self.set_status(format!("Резервное копирование запущено: {done} блокн."));
+            self.set_status(format!("Резервное копирование запущено: {started} блокн."));
         }
+    }
+
+    /// Synchronous copy before an operation that changes a lot at once
+    /// (restore, merge, password change, emptying the trash) and on exit.
+    pub fn safety_backup(&mut self, ni: usize, reason: &str) {
+        self.save_all();
+        let Some(opts) = self.backup_opts() else { return };
+        let nb = &self.notebooks[ni];
+        let (path, name) = (nb.path.clone(), nb.meta.name.clone());
+        if !self.backups_running.lock().unwrap().insert(path.clone()) {
+            return;
+        }
+        let result = crate::storage::backup_notebook(&path, &name, &opts, false).map(|d| d.map(describe_backup));
+        self.backups_running.lock().unwrap().remove(&path);
+        self.note_backup(&name, result.map(|r| r.map(|t| format!("{t} ({reason})"))));
+    }
+
+    fn note_backup(&mut self, name: &str, result: Result<Option<String>, String>) {
+        let result = match result {
+            Ok(None) => return,
+            Ok(Some(s)) => Ok(s),
+            Err(e) => {
+                crate::winapi::notify("Резервная копия не создана", &format!("{name}: {e}"));
+                self.set_status(format!("Резервная копия «{name}» не создана: {e}"));
+                Err(e)
+            }
+        };
+        self.backup_log.insert(0, BackupLog { time: now(), name: name.to_owned(), result });
+        self.backup_log.truncate(100);
     }
 
     fn poll_inbox(&mut self) {
@@ -1736,7 +1932,7 @@ impl App {
             }
         }
         // Backups (checked every 10 minutes).
-        if t - self.last_backup_check > 600.0 {
+        if t - self.last_backup_check > 300.0 {
             self.last_backup_check = t;
             self.run_backups(false);
         }
@@ -2038,7 +2234,8 @@ fn egui_extras_install(ctx: &Context) {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        timed_value("prev_cpu", frame.info().cpu_usage.unwrap_or(0.0) as f64 * 1000.0);
         let ctx = ui.ctx().clone();
         self.textures.poll(&ctx);
         self.poll_background(&ctx);
@@ -2071,13 +2268,24 @@ impl eframe::App for App {
             self.import_files(files, at);
         }
 
+        let frame_start = std::time::Instant::now();
         crate::ui_main::draw(self, ui);
-        crate::ui_dialogs::draw(self, &ctx);
-        self.viewports(&ctx);
-        self.periodic(&ctx);
+        timed("dialogs", || crate::ui_dialogs::draw(self, &ctx));
+        timed("viewports", || self.viewports(&ctx));
+        timed("periodic", || self.periodic(&ctx));
+        if profiling() {
+            let causes: Vec<String> = ctx.repaint_causes().iter().map(|c| format!("{}:{}", std::path::Path::new(c.file).file_name().and_then(|n| n.to_str()).unwrap_or(""), c.line)).collect();
+            PROF_CAUSES.lock().unwrap().push(causes.join(","));
+        }
+        prof_frame(frame_start);
 
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_all();
+            if self.settings.backup_enabled && self.settings.backup_on_exit {
+                for ni in 0..self.notebooks.len() {
+                    self.safety_backup(ni, "при выходе");
+                }
+            }
             if let (Some(pid), Some(nb)) = (self.cur_page, self.nb()) {
                 nb.release_page_lock(pid, &self.settings.author);
             }
@@ -2091,5 +2299,51 @@ impl eframe::App for App {
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         visuals.panel_fill.to_normalized_gamma_f32()
+    }
+}
+
+// ---- optional frame profiler (NN_PROFILE=<file>) ----------------------------------
+
+static PROFILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+static PROF_CAUSES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static PROF_PARTS: std::sync::Mutex<Vec<(&'static str, f64)>> = std::sync::Mutex::new(Vec::new());
+
+fn profiling() -> bool {
+    PROFILE.get_or_init(|| std::env::var_os("NN_PROFILE").map(Into::into)).is_some()
+}
+
+/// Runs `f`, recording its duration when profiling is on.
+pub fn timed<R>(name: &'static str, f: impl FnOnce() -> R) -> R {
+    if !profiling() {
+        return f();
+    }
+    let t = std::time::Instant::now();
+    let r = f();
+    PROF_PARTS.lock().unwrap().push((name, t.elapsed().as_secs_f64() * 1000.0));
+    r
+}
+
+fn prof_frame(start: std::time::Instant) {
+    let Some(Some(path)) = PROFILE.get() else { return };
+    let parts = std::mem::take(&mut *PROF_PARTS.lock().unwrap());
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let list: Vec<String> = parts.iter().map(|(n, ms)| format!("{n}={ms:.2}")).collect();
+        let causes = std::mem::take(&mut *PROF_CAUSES.lock().unwrap()).join(",");
+        let _ = writeln!(f, "total={:.2} {} cause={}", start.elapsed().as_secs_f64() * 1000.0, list.join(" "), causes);
+    }
+}
+
+fn timed_value(name: &'static str, ms: f64) {
+    if profiling() {
+        PROF_PARTS.lock().unwrap().push((name, ms));
+    }
+}
+
+fn describe_backup(d: crate::storage::BackupDone) -> String {
+    let base = format!("{} · {}", d.file.file_name().unwrap_or_default().to_string_lossy(), crate::storage::human_size(d.size));
+    match d.mirror_error {
+        Some(e) => format!("{base}; вторая папка: ошибка — {e}"),
+        None => base,
     }
 }

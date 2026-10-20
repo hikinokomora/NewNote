@@ -2140,3 +2140,39 @@ mod files {
         s
     }
 }
+
+#[cfg(test)]
+mod stress {
+    use super::*;
+
+    /// Builds a large notebook for performance checks: NN_BIG_DIR=<folder> cargo test big_notebook -- --ignored
+    #[test]
+    #[ignore]
+    fn big_notebook() {
+        let Some(dir) = std::env::var_os("NN_BIG_DIR") else { return };
+        let mut nb = Notebook::create(Path::new(&dir), "Большой блокнот").unwrap();
+        let o = Opts { author: "test".into(), font: String::new(), size: 15.0 };
+        let mut tree = Vec::new();
+        for s in 0..30 {
+            let mut sec = Section::new(&format!("Раздел {s}"), (s % 16) as u8);
+            for i in 0..200 {
+                let mut b = Builder::new(&nb, &o);
+                b.text(&format!("# Страница {i}\nТекст заметки номер {i} в разделе {s}. **Важно** и *курсив*.\n- пункт один\n- пункт два"));
+                for k in 0..20 {
+                    let pts: Vec<InkPoint> = (0..60).map(|j| InkPoint(100.0 + j as f32 * 4.0, 300.0 + k as f32 * 12.0 + (j as f32 * 0.3).sin() * 6.0, 0.6)).collect();
+                    b.page.strokes.push(Stroke::new(pts, [30, 30, 30, 255], 2.0, InkKind::Pen));
+                }
+                let mut pm = PageMeta::new(&format!("Страница {i}"), "test");
+                let mut page = b.finish(String::new()).page;
+                page.id = pm.id;
+                pm.level = (i % 7 == 3) as u8;
+                crate::storage::write_page(&nb.page_path(pm.id), &page, None);
+                sec.pages.push(pm);
+            }
+            tree.push(Node::Section(sec));
+        }
+        nb.meta.tree = tree;
+        nb.save_meta();
+        println!("{}", nb.path.display());
+    }
+}
