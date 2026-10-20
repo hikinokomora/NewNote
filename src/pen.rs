@@ -30,6 +30,15 @@ pub struct PenSample {
     pub eraser: bool,
     pub barrel: bool,
     pub id: u32,
+    /// Device timestamp in seconds (for velocity-aware smoothing).
+    pub time: f64,
+}
+
+impl PenSample {
+    /// Tilt magnitude 0 (upright) .. 1 (flat).
+    pub fn tilt(&self) -> f32 {
+        ((self.tilt_x * self.tilt_x + self.tilt_y * self.tilt_y) as f32).sqrt().min(90.0) / 90.0
+    }
 }
 
 #[derive(Default)]
@@ -38,6 +47,7 @@ struct Shared {
     pen_ids: HashSet<u32>,
     in_range: bool,
     last_pressure: Option<f32>,
+    last_tilt: (i32, i32),
 }
 
 static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
@@ -60,6 +70,11 @@ pub fn is_pen_id(id: u64) -> bool {
 /// Pressure of the pen while it touches the surface (for the settings test area).
 pub fn peek_last_pressure() -> Option<f32> {
     shared().lock().unwrap().last_pressure
+}
+
+/// Last tilt in degrees (x, y).
+pub fn peek_last_tilt() -> (i32, i32) {
+    shared().lock().unwrap().last_tilt
 }
 
 pub fn pen_in_range() -> bool {
@@ -129,6 +144,7 @@ unsafe fn handle_pointer(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, w
             eraser: false,
             barrel: false,
             id: pointer_id,
+            time: 0.0,
         });
         drop(sh);
         if let Some(c) = CTX.get() {
@@ -186,6 +202,11 @@ unsafe fn handle_pointer(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, w
         };
         sh.in_range = phase != PenPhase::Up || flags & POINTER_FLAG_INRANGE != 0;
         sh.last_pressure = matches!(phase, PenPhase::Down | PenPhase::Move).then_some(pressure);
+        let (tx, ty) = (
+            if info.penMask & PEN_MASK_TILT_X != 0 { info.tiltX } else { 0 },
+            if info.penMask & PEN_MASK_TILT_Y != 0 { info.tiltY } else { 0 },
+        );
+        sh.last_tilt = (tx, ty);
         sh.queue.push(PenSample {
             x,
             y,
@@ -196,6 +217,7 @@ unsafe fn handle_pointer(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, w
             eraser: info.penFlags & (PEN_FLAG_ERASER | PEN_FLAG_INVERTED) != 0,
             barrel: info.penFlags & PEN_FLAG_BARREL != 0,
             id: pointer_id,
+            time: pi.dwTime as f64 / 1000.0,
         });
     }
     // Keep memory bounded if the UI is not draining (e.g. minimized).

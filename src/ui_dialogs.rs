@@ -38,6 +38,7 @@ pub fn draw(app: &mut App, ctx: &Context) {
         Dialog::Confirm { .. } => "Подтверждение",
         Dialog::BackupPassword(_) => "Пароль резервных копий",
         Dialog::Flashcards { .. } => "Карточки",
+        Dialog::ClearInk => "Очистить рукопись",
     };
     let mut open = true;
     let mut res = Res::Keep;
@@ -580,6 +581,26 @@ fn body(app: &mut App, ui: &mut Ui, ctx: &Context, d: &mut Dialog) -> Res {
                 app.run_backups_now();
                 return Res::Close;
             }
+        }
+        Dialog::ClearInk => {
+            ui.label("Удалить все рукописные объекты на странице? Действие можно отменить (Ctrl+Z).");
+            ui.horizontal(|ui| {
+                if ui.button("Удалить").clicked() {
+                    if let Some(pid) = app.cur_page {
+                        app.with_page(|page, ed| {
+                            ed.snapshot(page);
+                            page.strokes.retain(|s| s.locked);
+                            ed.selection = Default::default();
+                        });
+                        app.mark_dirty(pid);
+                    }
+                    app.dialogs.clear();
+                }
+                if ui.button("Отмена").clicked() {
+                    app.dialogs.clear();
+                }
+            });
+            return Res::Close;
         }
         Dialog::Flashcards { cards, idx, flipped } => {
             let n = cards.len();

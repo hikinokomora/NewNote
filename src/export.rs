@@ -70,35 +70,7 @@ fn table_html(t: &Table) -> String {
 }
 
 pub fn ink_svg(strokes: &[Stroke]) -> String {
-    let mut bb = egui::Rect::NOTHING;
-    for s in strokes {
-        bb = bb.union(s.bbox());
-    }
-    if !bb.is_positive() {
-        return String::new();
-    }
-    let mut s = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{:.0}\" height=\"{:.0}\" viewBox=\"{:.1} {:.1} {:.1} {:.1}\">",
-        bb.width(), bb.height(), bb.min.x, bb.min.y, bb.width(), bb.height()
-    );
-    for st in strokes {
-        let pts: Vec<String> = st.points.iter().map(|p| format!("{:.1},{:.1}", p.0, p.1)).collect();
-        let [r, g, b, a] = st.color;
-        let fill = match st.fill {
-            Some(f) => format!("rgba({},{},{},{:.2})", f[0], f[1], f[2], f[3] as f32 / 255.0),
-            None => "none".into(),
-        };
-        let avg_p = st.points.iter().map(|p| p.2).sum::<f32>() / st.points.len().max(1) as f32;
-        let w = crate::ink::pressure_width(st.width, avg_p, 1.0, st.kind);
-        let tag = if st.closed { "polygon" } else { "polyline" };
-        s.push_str(&format!(
-            "<{tag} points=\"{}\" fill=\"{fill}\" stroke=\"rgba({r},{g},{b},{:.2})\" stroke-width=\"{w:.2}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>",
-            pts.join(" "),
-            a as f32 / 255.0
-        ));
-    }
-    s.push_str("</svg>");
-    s
+    crate::raster::strokes_svg(strokes, 1.0)
 }
 
 pub fn page_html_body(nb: &Notebook, page: &Page, title: &str) -> String {
@@ -134,6 +106,12 @@ pub fn page_html_body(nb: &Notebook, page: &Page, title: &str) -> String {
             ItemKind::Diagram(d) => out.push_str(&format!("<pre class=\"diagram\">{}</pre>\n", esc(&d.source))),
             ItemKind::Divider { page_break } => {
                 out.push_str(if *page_break { "<hr style=\"page-break-after:always\">\n" } else { "<hr>\n" })
+            }
+            ItemKind::Chart(c) => {
+                out.push_str(&format!("<p><b>{}</b></p>\n", esc(&c.title)));
+                for (l, v) in c.rows() {
+                    out.push_str(&format!("<p>{}: {}</p>\n", esc(&l), crate::calc::fmt_num(v)));
+                }
             }
         }
     }
@@ -190,6 +168,12 @@ pub fn page_markdown(nb: &Notebook, page: &Page, title: &str, assets_dir: Option
             ItemKind::Code(c) => out.push_str(&format!("```{}\n{}\n```\n", c.lang, c.code)),
             ItemKind::Diagram(d) => out.push_str(&format!("```\n{}\n```\n", d.source)),
             ItemKind::Divider { .. } => out.push_str("---\n"),
+            ItemKind::Chart(c) => {
+                out.push_str(&format!("**{}**\n", c.title));
+                for (l, v) in c.rows() {
+                    out.push_str(&format!("- {l}: {}\n", crate::calc::fmt_num(v)));
+                }
+            }
         }
         out.push('\n');
     }

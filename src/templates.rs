@@ -20,15 +20,15 @@ pub fn builtin(name: &str, id: Id, st: &Settings) -> Page {
             p.items.push(text(0.0, "## План\n**Цель:** \n\n### Шаги\n1. \n2. \n3. \n\n### Сроки\n- \n\n### Ресурсы\n- ", st));
         }
         "Список дел" => {
-            p.background = Background::Lines;
+            p.pattern = Some(Pattern::LinesMedium);
             p.items.push(text(0.0, &format!("## Дела на {today}\n[ ] \n[ ] \n[ ] \n\n### Позже\n[ ] "), st));
         }
         "Конспект" => {
-            p.background = Background::Grid;
+            p.pattern = Some(Pattern::GridMedium);
             p.items.push(text(0.0, &format!("# Тема\n*{today}*\n\n## Ключевые понятия\n- Понятие — определение\n\n## Записи\n\n## Вопросы\n- \n\n## Итог\n"), st));
         }
         "Дневник" => {
-            p.background = Background::Lines;
+            p.pattern = Some(Pattern::LinesMedium);
             p.items.push(text(0.0, &format!("## {today}\n**Настроение:** \n\n### Что произошло\n\n### За что благодарен\n- \n\n### Планы на завтра\n[ ] "), st));
         }
         "Проект" => {

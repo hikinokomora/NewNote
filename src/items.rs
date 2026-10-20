@@ -117,6 +117,7 @@ pub fn item_ui(ui: &mut Ui, item: &mut Item, sr: Rect, clip: Rect, ed: &mut Edit
         ItemKind::Equation(_) => equation_ui(ui, item, sr, clip, ed, env, interactive, &mut changed),
         ItemKind::Code(_) => code_ui(ui, item, sr, clip, ed, env, interactive, &mut changed),
         ItemKind::Diagram(_) => diagram_ui(ui, item, sr, clip, ed, env, interactive, &mut changed),
+        ItemKind::Chart(_) => chart_ui(ui, item, sr, clip, ed, env, interactive, &mut changed),
         ItemKind::Divider { page_break } => {
             let y = sr.min.y + 10.0 * zoom;
             let c = if env.dark { Color32::from_gray(110) } else { Color32::from_gray(150) };
@@ -1772,3 +1773,78 @@ fn diagram_ui(ui: &mut Ui, item: &mut Item, sr: Rect, clip: Rect, ed: &mut Edito
 }
 
 pub fn _unused(_: Vec2) {}
+
+#[allow(clippy::too_many_arguments)]
+fn chart_ui(ui: &mut Ui, item: &mut Item, sr: Rect, clip: Rect, ed: &mut Editor, env: &mut Env, interactive: bool, changed: &mut bool) -> f32 {
+    let item_id = item.id;
+    let ItemKind::Chart(c) = &mut item.kind else { return 0.0 };
+    let editing = ed.editing == Some(item_id) && interactive && !ed.readonly;
+    let mut y = sr.min.y;
+    if editing {
+        let r = Rect::from_min_size(sr.min, vec2(sr.width(), 160.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r));
+        child.set_clip_rect(clip);
+        child.horizontal(|ui| {
+            for (k, l) in [(ChartKind::Bar, "Столбцы"), (ChartKind::Line, "Линия"), (ChartKind::Pie, "Круговая")] {
+                if ui.selectable_label(c.kind == k, l).clicked() {
+                    c.kind = k;
+                    *changed = true;
+                }
+            }
+        });
+        *changed |= child.text_edit_singleline(&mut c.title).changed();
+        *changed |= child.add(TextEdit::multiline(&mut c.data).desired_rows(4).hint_text("Январь: 10")).changed();
+        y += 160.0;
+    }
+    let rows = c.rows();
+    let painter = ui.painter_at(clip);
+    let fg = if env.dark { Color32::from_gray(220) } else { Color32::from_gray(40) };
+    painter.text(pos2(sr.min.x, y), Align2::LEFT_TOP, &c.title, FontId::proportional(14.0 * ed.zoom), fg);
+    let area = Rect::from_min_size(pos2(sr.min.x, y + 22.0), vec2(sr.width(), sr.width() * 0.5));
+    let maxv = rows.iter().map(|r| r.1).fold(0.0f64, f64::max).max(1e-9);
+    let pal = [Color32::from_rgb(66, 133, 244), Color32::from_rgb(219, 68, 55), Color32::from_rgb(244, 180, 0), Color32::from_rgb(15, 157, 88), Color32::from_rgb(171, 71, 188), Color32::from_rgb(0, 172, 193)];
+    if !rows.is_empty() {
+        match c.kind {
+            ChartKind::Bar => {
+                let w = area.width() / rows.len() as f32;
+                for (i, (l, v)) in rows.iter().enumerate() {
+                    let h = (*v / maxv) as f32 * (area.height() - 18.0);
+                    let r = Rect::from_min_max(pos2(area.min.x + i as f32 * w + 4.0, area.max.y - 18.0 - h), pos2(area.min.x + (i + 1) as f32 * w - 4.0, area.max.y - 18.0));
+                    painter.rect_filled(r, 2.0, pal[i % pal.len()]);
+                    painter.text(pos2(r.center().x, area.max.y - 16.0), Align2::CENTER_TOP, l, FontId::proportional(11.0), fg);
+                }
+            }
+            ChartKind::Line => {
+                let n = rows.len().max(2) - 1;
+                let pts: Vec<Pos2> = rows.iter().enumerate().map(|(i, (_, v))| pos2(area.min.x + area.width() * i as f32 / n as f32, area.max.y - 18.0 - (*v / maxv) as f32 * (area.height() - 18.0))).collect();
+                painter.add(egui::Shape::line(pts.clone(), EStroke::new(2.0, pal[0])));
+                for p in pts {
+                    painter.circle_filled(p, 3.0, pal[0]);
+                }
+            }
+            ChartKind::Pie => {
+                let total: f64 = rows.iter().map(|r| r.1.max(0.0)).sum::<f64>().max(1e-9);
+                let center = pos2(area.min.x + area.height() * 0.5, area.center().y);
+                let rad = area.height() * 0.45;
+                let mut a0 = -std::f32::consts::FRAC_PI_2;
+                for (i, (l, v)) in rows.iter().enumerate() {
+                    let sweep = (v.max(0.0) / total) as f32 * std::f32::consts::TAU;
+                    let n = ((sweep * 20.0) as usize).max(2);
+                    let mut pts = vec![center];
+                    for k in 0..=n {
+                        let a = a0 + sweep * k as f32 / n as f32;
+                        pts.push(center + vec2(a.cos(), a.sin()) * rad);
+                    }
+                    painter.add(egui::Shape::convex_polygon(pts, pal[i % pal.len()], EStroke::NONE));
+                    painter.text(pos2(center.x + rad + 14.0, area.min.y + i as f32 * 16.0), Align2::LEFT_TOP, format!("■ {l}: {}", crate::calc::fmt_num(*v)), FontId::proportional(11.0), pal[i % pal.len()]);
+                    a0 += sweep;
+                }
+            }
+        }
+    }
+    let total = area.max.y - sr.min.y;
+    if interactive && !editing && ui.interact(Rect::from_min_max(sr.min, area.max).intersect(clip), egui::Id::new(("chartd", item_id)), Sense::click()).double_clicked() {
+        ed.editing = Some(item_id);
+    }
+    total
+}

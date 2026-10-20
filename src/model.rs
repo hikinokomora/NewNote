@@ -327,25 +327,118 @@ pub enum Background {
     Grid,
     Dots,
     Millimeter,
+    #[serde(other)]
+    Unknown,
 }
 
-impl Background {
-    pub const ALL: [Background; 5] = [
-        Background::Plain,
-        Background::Lines,
-        Background::Grid,
-        Background::Dots,
-        Background::Millimeter,
+/// Background pattern including the newer kinds (separate field so old files load).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Pattern {
+    #[default]
+    Plain,
+    LinesNarrow,
+    LinesMedium,
+    LinesWide,
+    Handwriting,
+    GridSmall,
+    GridMedium,
+    GridLarge,
+    DotsSmall,
+    DotsLarge,
+    Isometric,
+    Millimeter,
+    Staff,
+}
+
+impl Pattern {
+    pub const ALL: [Pattern; 13] = [
+        Pattern::Plain,
+        Pattern::LinesNarrow,
+        Pattern::LinesMedium,
+        Pattern::LinesWide,
+        Pattern::Handwriting,
+        Pattern::GridSmall,
+        Pattern::GridMedium,
+        Pattern::GridLarge,
+        Pattern::DotsSmall,
+        Pattern::DotsLarge,
+        Pattern::Isometric,
+        Pattern::Millimeter,
+        Pattern::Staff,
     ];
     pub fn label(self) -> &'static str {
         match self {
-            Background::Plain => "Чистый",
-            Background::Lines => "Линейка",
-            Background::Grid => "Клетка",
-            Background::Dots => "Точки",
-            Background::Millimeter => "Миллиметровка",
+            Pattern::Plain => "Чистый лист",
+            Pattern::LinesNarrow => "Линейка узкая",
+            Pattern::LinesMedium => "Линейка средняя",
+            Pattern::LinesWide => "Линейка широкая",
+            Pattern::Handwriting => "Линейка для письма",
+            Pattern::GridSmall => "Клетка мелкая",
+            Pattern::GridMedium => "Клетка средняя",
+            Pattern::GridLarge => "Клетка крупная",
+            Pattern::DotsSmall => "Точки мелкие",
+            Pattern::DotsLarge => "Точки крупные",
+            Pattern::Isometric => "Изометрия",
+            Pattern::Millimeter => "Миллиметровка",
+            Pattern::Staff => "Нотный стан",
         }
     }
+    /// Default cell size in canvas units.
+    pub fn default_step(self) -> f32 {
+        match self {
+            Pattern::LinesNarrow => 24.0,
+            Pattern::LinesMedium => 32.0,
+            Pattern::LinesWide => 42.0,
+            Pattern::Handwriting => 36.0,
+            Pattern::GridSmall => 15.0,
+            Pattern::GridMedium => 24.0,
+            Pattern::GridLarge => 38.0,
+            Pattern::DotsSmall => 18.0,
+            Pattern::DotsLarge => 30.0,
+            Pattern::Isometric => 28.0,
+            Pattern::Millimeter => 96.0 / 25.4,
+            Pattern::Staff => 10.0,
+            Pattern::Plain => 24.0,
+        }
+    }
+    /// Step used by "snap to grid".
+    pub fn snap_step(self, custom: f32) -> f32 {
+        let s = if custom > 0.0 { custom } else { self.default_step() };
+        if self == Pattern::Millimeter { s * 5.0 } else { s }
+    }
+}
+
+impl Background {
+    pub fn to_pattern(self) -> Pattern {
+        match self {
+            Background::Lines => Pattern::LinesMedium,
+            Background::Grid => Pattern::GridMedium,
+            Background::Dots => Pattern::DotsSmall,
+            Background::Millimeter => Pattern::Millimeter,
+            _ => Pattern::Plain,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Layer {
+    pub visible: bool,
+    pub locked: bool,
+    pub opacity: f32,
+}
+
+impl Default for Layer {
+    fn default() -> Self {
+        Self { visible: true, locked: false, opacity: 1.0 }
+    }
+}
+
+pub const LAYER_NAMES: [&str; 3] = ["Фон", "Рисунок", "Аннотации"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Guide {
+    pub vertical: bool,
+    pub at: f32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,12 +491,143 @@ impl InkPoint {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InkKind {
+    /// Pressure-sensitive pen.
     #[default]
     Pen,
     Highlighter,
     Shape,
+    /// Thin uniform ballpoint.
+    Ballpoint,
+    /// Grainy pencil, shade follows pressure and tilt.
+    Pencil,
+    /// Width follows the stroke direction.
+    Calligraphy,
+    /// Soft edges, transparency follows pressure.
+    Watercolor,
+    /// Scattered dots.
+    Spray,
+    /// Dense textured stroke made of bristles.
+    Oil,
+}
+
+impl InkKind {
+    pub const BRUSHES: [InkKind; 8] = [
+        InkKind::Pen,
+        InkKind::Ballpoint,
+        InkKind::Pencil,
+        InkKind::Calligraphy,
+        InkKind::Highlighter,
+        InkKind::Watercolor,
+        InkKind::Spray,
+        InkKind::Oil,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            InkKind::Pen => "Перо",
+            InkKind::Highlighter => "Маркер",
+            InkKind::Shape => "Фигура",
+            InkKind::Ballpoint => "Шариковая ручка",
+            InkKind::Pencil => "Карандаш",
+            InkKind::Calligraphy => "Каллиграфическое перо",
+            InkKind::Watercolor => "Акварель",
+            InkKind::Spray => "Баллончик",
+            InkKind::Oil => "Масляная кисть",
+        }
+    }
+    pub fn icon(self) -> &'static str {
+        match self {
+            InkKind::Pen => "✒",
+            InkKind::Highlighter => "▌",
+            InkKind::Shape => "◇",
+            InkKind::Ballpoint => "🖊",
+            InkKind::Pencil => "✏",
+            InkKind::Calligraphy => "🖋",
+            InkKind::Watercolor => "💧",
+            InkKind::Spray => "🌫",
+            InkKind::Oil => "🖌",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Effect {
+    #[default]
+    None,
+    Rainbow,
+    Gold,
+    Silver,
+    Gradient([u8; 4]),
+}
+
+impl Effect {
+    pub fn label(self) -> &'static str {
+        match self {
+            Effect::None => "Без эффекта",
+            Effect::Rainbow => "Радужный",
+            Effect::Gold => "Золотой",
+            Effect::Silver => "Серебряный",
+            Effect::Gradient(_) => "Градиент",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Dash {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+    DashDot,
+}
+
+impl Dash {
+    pub const ALL: [Dash; 4] = [Dash::Solid, Dash::Dashed, Dash::Dotted, Dash::DashDot];
+    pub fn label(self) -> &'static str {
+        match self {
+            Dash::Solid => "Сплошная",
+            Dash::Dashed => "Пунктир",
+            Dash::Dotted => "Точки",
+            Dash::DashDot => "Штрихпунктир",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StrokeStyle {
+    #[serde(default)]
+    pub effect: Effect,
+    #[serde(default)]
+    pub dash: Dash,
+    #[serde(default)]
+    pub arrow_start: bool,
+    #[serde(default)]
+    pub arrow_end: bool,
+    #[serde(default)]
+    pub shadow: bool,
+    #[serde(default)]
+    pub glow: bool,
+    /// Ignore pressure (uniform width).
+    #[serde(default)]
+    pub no_pressure: bool,
+    /// Text drawn in the middle of a shape.
+    #[serde(default)]
+    pub label: String,
+    /// Numbered marker.
+    #[serde(default)]
+    pub marker: bool,
+    /// Redaction box that hides what is under it.
+    #[serde(default)]
+    pub redact: bool,
+}
+
+fn default_layer() -> u8 {
+    1
+}
+
+pub fn rand_u64() -> u64 {
+    rand::random::<u64>() | 1
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -417,9 +641,62 @@ pub struct Stroke {
     pub fill: Option<[u8; 4]>,
     #[serde(default)]
     pub closed: bool,
+    #[serde(default, skip_serializing_if = "is_default_style")]
+    pub style: Arc<StrokeStyle>,
+    /// Pen tilt per point (0 = upright, 255 = flat); empty when unknown.
+    #[serde(default, skip_serializing_if = "is_empty_tilt")]
+    pub tilt: Arc<Vec<u8>>,
+    #[serde(default = "default_layer")]
+    pub layer: u8,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub group: u32,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+    /// Annotation attached to a container: moves together with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<Id>,
+    #[serde(default = "rand_u64")]
+    pub id: u64,
+    /// Connector endpoints glued to other strokes (by id).
+    #[serde(default, skip_serializing_if = "no_attach")]
+    pub attach: [Option<u64>; 2],
+}
+
+fn is_default_style(s: &Arc<StrokeStyle>) -> bool {
+    **s == StrokeStyle::default()
+}
+fn is_empty_tilt(t: &Arc<Vec<u8>>) -> bool {
+    t.is_empty()
+}
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+fn no_attach(a: &[Option<u64>; 2]) -> bool {
+    a[0].is_none() && a[1].is_none()
 }
 
 impl Stroke {
+    pub fn new(points: Vec<InkPoint>, color: [u8; 4], width: f32, kind: InkKind) -> Self {
+        Self {
+            points: Arc::new(points),
+            color,
+            width,
+            kind,
+            fill: None,
+            closed: false,
+            style: Arc::new(StrokeStyle::default()),
+            tilt: Arc::new(Vec::new()),
+            layer: 1,
+            group: 0,
+            locked: false,
+            anchor: None,
+            id: rand_u64(),
+            attach: [None, None],
+        }
+    }
     pub fn color32(&self) -> egui::Color32 {
         let [r, g, b, a] = self.color;
         egui::Color32::from_rgba_unmultiplied(r, g, b, a)
@@ -429,7 +706,12 @@ impl Stroke {
         for p in self.points.iter() {
             r.extend_with(p.pos());
         }
-        r.expand(self.width)
+        let pad = match self.kind {
+            InkKind::Spray => self.width * 2.2,
+            InkKind::Watercolor | InkKind::Oil => self.width * 1.2,
+            _ => self.width,
+        } + if self.style.glow || self.style.shadow { 8.0 } else { 0.0 };
+        r.expand(pad)
     }
 }
 
@@ -475,6 +757,9 @@ pub struct TextBlock {
     pub rtl: bool,
     #[serde(default)]
     pub lang: String,
+    /// Background colour: turns the block into a sticky note.
+    #[serde(default)]
+    pub bg: Option<[u8; 4]>,
 }
 
 fn one() -> f32 {
@@ -495,6 +780,7 @@ impl TextBlock {
             indent: 0.0,
             rtl: false,
             lang: String::new(),
+            bg: None,
         }
     }
 }
@@ -610,6 +896,7 @@ pub struct Diagram {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ItemKind {
     Text(TextBlock),
+    Chart(Chart),
     Image(ImageItem),
     File(FileItem),
     Table(Table),
@@ -630,7 +917,36 @@ impl ItemKind {
             ItemKind::Code(_) => "Код",
             ItemKind::Diagram(_) => "Диаграмма",
             ItemKind::Divider { .. } => "Разделитель",
+            ItemKind::Chart(_) => "Диаграмма данных",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChartKind {
+    #[default]
+    Bar,
+    Line,
+    Pie,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Chart {
+    pub kind: ChartKind,
+    pub title: String,
+    /// One data point per line: "label: value".
+    pub data: String,
+}
+
+impl Chart {
+    pub fn rows(&self) -> Vec<(String, f64)> {
+        self.data
+            .lines()
+            .filter_map(|l| {
+                let (a, b) = l.rsplit_once([':', ';', '\t', '='])?;
+                Some((a.trim().to_owned(), crate::calc::parse_number(b)?))
+            })
+            .collect()
     }
 }
 
@@ -650,6 +966,12 @@ pub struct Item {
     pub author: String,
     #[serde(default = "now")]
     pub modified: NaiveDateTime,
+    /// Locked containers cannot be moved or edited.
+    #[serde(default)]
+    pub locked: bool,
+    /// Underlay: background image or PDF under the drawing.
+    #[serde(default)]
+    pub underlay: bool,
 }
 
 impl Item {
@@ -664,6 +986,8 @@ impl Item {
             task: None,
             author: author.to_owned(),
             modified: now(),
+            locked: false,
+            underlay: false,
         }
     }
     pub fn pos2(&self) -> egui::Pos2 {
@@ -702,6 +1026,7 @@ impl Item {
             ItemKind::Code(c) => c.code.clone(),
             ItemKind::Diagram(d) => d.source.clone(),
             ItemKind::Divider { .. } => String::new(),
+            ItemKind::Chart(c) => format!("{}\n{}", c.title, c.data),
         }
     }
 }
@@ -734,6 +1059,17 @@ pub struct Page {
     /// Text recognized from ink (for search).
     #[serde(default)]
     pub ink_text: String,
+    #[serde(default)]
+    pub pattern: Option<Pattern>,
+    /// Custom cell size of the pattern (0 = default).
+    #[serde(default)]
+    pub pattern_step: f32,
+    #[serde(default)]
+    pub line_color: Option<[u8; 4]>,
+    #[serde(default)]
+    pub layers: [Layer; 3],
+    #[serde(default)]
+    pub guides: Vec<Guide>,
 }
 
 impl Page {
@@ -748,7 +1084,16 @@ impl Page {
             comments: Vec::new(),
             sensitivity: Sensitivity::None,
             ink_text: String::new(),
+            pattern: None,
+            pattern_step: 0.0,
+            line_color: None,
+            layers: [Layer::default(); 3],
+            guides: Vec::new(),
         }
+    }
+
+    pub fn pattern(&self) -> Pattern {
+        self.pattern.unwrap_or_else(|| self.background.to_pattern())
     }
 
     pub fn plain_text(&self) -> String {

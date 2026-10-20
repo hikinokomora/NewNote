@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod brush;
 mod calc;
 mod canvas;
 mod crypto;
@@ -12,13 +13,18 @@ mod items;
 mod model;
 mod ops;
 mod pen;
+mod raster;
 mod richtext;
 mod search;
+mod selection;
 mod settings;
+mod shapes;
+mod smooth;
 mod storage;
 mod templates;
 mod textures;
 mod ui_dialogs;
+mod ui_draw;
 mod ui_main;
 mod ui_panels;
 mod winapi;

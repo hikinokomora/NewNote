@@ -58,6 +58,7 @@ pub enum Dialog {
     Confirm { text: String, action: ConfirmAction },
     BackupPassword(String),
     Flashcards { cards: Vec<(String, String)>, idx: usize, flipped: bool },
+    ClearInk,
 }
 
 #[derive(Clone, Debug)]
@@ -124,6 +125,7 @@ pub enum BgResult {
     Ocr { page: Id, item: Option<Id>, text: Result<String, String> },
     Pdf { page: Id, at: [f32; 2], images: Result<Vec<Vec<u8>>, String>, nb: PathBuf },
     Summary(Vec<SummaryRow>),
+    Math { page: Id, text: Result<String, String> },
 }
 
 #[derive(Clone)]
@@ -205,6 +207,9 @@ pub struct App {
     pub pending_add: Vec<PathBuf>,
     pub screen_capture_prev: bool,
     pub focus_request: bool,
+    pub pen_settings: Option<usize>,
+    pub pen_pick_slot: Option<usize>,
+    pub underlay_next: bool,
 }
 
 impl App {
@@ -282,6 +287,9 @@ impl App {
             pending_add: add_files,
             screen_capture_prev: false,
             focus_request: false,
+            pen_settings: None,
+            pen_pick_slot: None,
+            underlay_next: false,
             settings,
         };
         app.apply_theme(&ctx);
@@ -423,7 +431,19 @@ impl App {
             Ok(p) => {
                 self.pages.insert(pid, p);
                 let mut ed = Editor::new(pid);
-                ed.pen_color = self.settings.pen_presets.first().map(|p| p.color).unwrap_or([20, 20, 20, 255]);
+                if let Some(p) = self.settings.pens().first() {
+                    ed.set_pen(p, Some(0));
+                    ed.tool = Tool::Select;
+                }
+                // Keep the brush of the previous page.
+                if let Some(prev) = self.cur_page.and_then(|c| self.editors.get(&c)) {
+                    ed.pen = prev.pen.clone();
+                    ed.pen_slot = prev.pen_slot;
+                    ed.tool = if prev.tool.is_ink() { prev.tool } else { Tool::Select };
+                    ed.shape = prev.shape.clone();
+                    ed.eraser_mode = prev.eraser_mode;
+                    ed.eraser_radius = prev.eraser_radius;
+                }
                 self.editors.entry(pid).or_insert(ed);
                 true
             }
@@ -677,6 +697,7 @@ impl App {
     pub fn handle_action(&mut self, ctx: &Context, a: Action) {
         match a {
             Action::OpenLink(url) => self.open_link(&url),
+            Action::Status(s) if s == "underlay" => self.pick_underlay(),
             Action::Status(s) => self.set_status(s),
             Action::CopyText(t) => {
                 ctx.copy_text(t);
@@ -700,7 +721,128 @@ impl App {
                     self.mark_dirty(p);
                 }
             }
+            Action::PickColor(c) => {
+                if let Some(slot) = self.pen_pick_slot.take() {
+                    if let Some(p) = self.settings.pens_mut().get_mut(slot) {
+                        p.color = [c[0], c[1], c[2], p.color[3]];
+                    }
+                    self.settings.save();
+                    self.pen_settings = Some(slot);
+                }
+                self.set_status("Цвет взят со штриха");
+            }
+            Action::InkToMath => self.start_ocr_math(),
+            Action::ExportSelection(fmt) => self.export_drawing(ctx, fmt),
         }
+    }
+
+    fn selected_or_all_strokes(&mut self) -> Vec<Stroke> {
+        self.with_page(|page, ed| {
+            if ed.selection.strokes.is_empty() {
+                page.strokes.clone()
+            } else {
+                ed.selection.strokes.iter().filter_map(|&i| page.strokes.get(i).cloned()).collect()
+            }
+        })
+        .unwrap_or_default()
+    }
+
+    /// PNG with transparency, SVG, clipboard image or GIF animation of the drawing.
+    fn export_drawing(&mut self, ctx: &Context, fmt: &str) {
+        let strokes = self.selected_or_all_strokes();
+        if strokes.is_empty() {
+            self.set_status("Нет рисунков");
+            return;
+        }
+        let curve = self.settings.pressure_curve;
+        match fmt {
+            "png" => {
+                if let Some(p) = rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name("рисунок.png").save_file() {
+                    match crate::raster::render_strokes(&strokes, 3.0, None, curve) {
+                        Some((img, _)) => match img.save(&p) {
+                            Ok(()) => self.set_status(format!("Сохранено: {}", p.display())),
+                            Err(e) => self.set_status(format!("Ошибка: {e}")),
+                        },
+                        None => self.set_status("Рисунок слишком большой"),
+                    }
+                }
+            }
+            "svg" => {
+                if let Some(p) = rfd::FileDialog::new().add_filter("SVG", &["svg"]).set_file_name("рисунок.svg").save_file() {
+                    let _ = std::fs::write(&p, crate::raster::strokes_svg(&strokes, curve));
+                    self.set_status(format!("Сохранено: {}", p.display()));
+                }
+            }
+            "copy" => {
+                if let Some((img, _)) = crate::raster::render_strokes(&strokes, 2.0, None, curve) {
+                    let data = arboard::ImageData { width: img.width() as usize, height: img.height() as usize, bytes: std::borrow::Cow::Owned(img.into_raw()) };
+                    match arboard::Clipboard::new().and_then(|mut c| c.set_image(data)) {
+                        Ok(()) => self.set_status("Рисунок скопирован как изображение"),
+                        Err(e) => self.set_status(format!("Ошибка буфера обмена: {e}")),
+                    }
+                }
+            }
+            "gif" => {
+                if let Some(p) = rfd::FileDialog::new().add_filter("GIF", &["gif"]).set_file_name("рисование.gif").save_file() {
+                    let bg = self.cur_page.and_then(|pid| self.pages.get(&pid)).and_then(|pg| pg.bg_color).unwrap_or([255, 255, 255, 255]);
+                    let all = self.cur_page.and_then(|pid| self.pages.get(&pid)).map(|pg| pg.strokes.clone()).unwrap_or(strokes);
+                    let tx = ctx.clone();
+                    self.set_status("Создание GIF…");
+                    let (done_tx, _) = std::sync::mpsc::channel::<()>();
+                    std::thread::spawn(move || {
+                        let _ = crate::raster::animation_gif(&all, 720, bg, curve, 8.0, &p);
+                        let _ = done_tx.send(());
+                        tx.request_repaint();
+                    });
+                }
+            }
+            _ => {}
+        }
+        let _ = ctx;
+    }
+
+    fn start_ocr_math(&mut self) {
+        let Some(pid) = self.cur_page else { return };
+        let strokes = self.selected_or_all_strokes();
+        if strokes.is_empty() {
+            self.set_status("Выделите рукописную формулу");
+            return;
+        }
+        let tx = self.bg_tx.clone();
+        self.set_status("Распознавание формулы…");
+        std::thread::spawn(move || {
+            let text = match crate::ink::rasterize(&strokes, 1.5) {
+                Some((img, _)) => crate::winapi::ocr(&image::DynamicImage::ImageLuma8(img).to_rgba8(), None),
+                None => Err("Пустой рисунок".into()),
+            };
+            let _ = tx.send(BgResult::Math { page: pid, text });
+        });
+    }
+
+    pub fn pick_underlay(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Изображение или PDF", &["png", "jpg", "jpeg", "bmp", "gif", "webp", "pdf"]).pick_file() else { return };
+        let Some(pid) = self.cur_page else { return };
+        let Some(ni) = self.nb_index_of_page(pid) else { return };
+        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")) {
+            self.underlay_next = true;
+            self.pdf_printout_from(path, [0.0, 0.0]);
+            return;
+        }
+        let Ok(data) = std::fs::read(&path) else { return };
+        let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_else(|| "png".into());
+        let (w, h) = image::load_from_memory(&data).map(|i| (i.width(), i.height())).unwrap_or((800, 600));
+        let asset = self.notebooks[ni].import_asset(&data, &ext);
+        let author = self.settings.author.clone();
+        self.with_page(|page, ed| {
+            ed.snapshot(page);
+            let width = (w as f32).min(1100.0);
+            let mut it = Item::new(egui::pos2(0.0, 0.0), width, ItemKind::Image(ImageItem { asset, crop: full_crop(), ..Default::default() }), &author);
+            it.underlay = true;
+            it.height = width * h as f32 / w.max(1) as f32;
+            page.items.insert(0, it);
+        });
+        self.mark_dirty(pid);
+        self.set_status("Подложка добавлена. «Фон → Редактировать подложку» — чтобы переместить её");
     }
 
     pub fn open_link(&mut self, url: &str) {
@@ -863,7 +1005,7 @@ impl App {
                         let Some(ni) = self.notebooks.iter().position(|n| n.path == nb) else { continue };
                         let author = self.settings.author.clone();
                         let mut y = at[1];
-                        let mut items = Vec::new();
+                        let mut items: Vec<Item> = Vec::new();
                         for png in imgs {
                             let (w, h) = image::load_from_memory(&png).map(|i| (i.width(), i.height())).unwrap_or((1400, 1980));
                             let asset = self.notebooks[ni].import_asset(&png, "png");
@@ -873,6 +1015,11 @@ impl App {
                             items.push(it);
                         }
                         let n = items.len();
+                        if std::mem::take(&mut self.underlay_next) {
+                            for it in items.iter_mut() {
+                                it.underlay = true;
+                            }
+                        }
                         self.ensure_loaded(page);
                         if let (Some(p), Some(ed)) = (self.pages.get_mut(&page), self.editors.get_mut(&page)) {
                             ed.snapshot(p);
@@ -886,6 +1033,17 @@ impl App {
                 BgResult::Summary(rows) => {
                     self.summary = rows;
                 }
+                BgResult::Math { page, text } => match text {
+                    Ok(t) => {
+                        let expr: String = t.lines().collect::<Vec<_>>().join(" ").replace(['×', '•'], "*").replace(['—', '–'], "-").replace('÷', "/");
+                        if self.cur_page == Some(page) {
+                            self.insert_item(ItemKind::Equation(expr), 420.0);
+                            self.with_page(|_, ed| ed.editing = None);
+                            self.set_status("Формула вставлена — щёлкните, чтобы исправить");
+                        }
+                    }
+                    Err(e) => self.set_status(format!("Ошибка распознавания: {e}")),
+                },
             }
             ctx.request_repaint();
         }
@@ -1147,6 +1305,7 @@ impl App {
         // Undo / redo (text fields have their own undo while editing text).
         let text_focus = ctx.memory(|m| m.focused().is_some()) && ctx.egui_wants_keyboard_input();
         if !text_focus {
+            self.drawing_shortcuts(ctx);
             if consume(sc(ctrl, Key::Z)) {
                 if let Some(p) = self.cur_page {
                     if self.with_page(|page, ed| ed.undo(page)).unwrap_or(false) {
@@ -1234,6 +1393,104 @@ impl App {
         if ctx.input(|i| i.key_pressed(Key::F5)) {
             self.presentation = !self.presentation;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.presentation));
+        }
+    }
+
+    /// Drawing hotkeys from the specification (only when no text field is focused).
+    fn drawing_shortcuts(&mut self, ctx: &Context) {
+        use egui::Key as K;
+        let Some(pid) = self.cur_page else { return };
+        let none = Modifiers::NONE;
+        let pressed = |m: Modifiers, k: K| ctx.input_mut(|i| i.consume_key(m, k));
+        let pens = self.settings.pens().to_vec();
+        let mut save = false;
+        let mut dirty = false;
+        let mut smart = false;
+        let mut grid = false;
+        {
+            let (Some(ed), Some(page)) = (self.editors.get_mut(&pid), self.pages.get_mut(&pid)) else { return };
+            if ed.editing.is_some() {
+                return;
+            }
+            if pressed(Modifiers::ALT, K::Num1) {
+                ed.tool = Tool::Select;
+            }
+            if pressed(Modifiers::ALT, K::Num2) {
+                let p = ed.pen.clone();
+                ed.set_pen(&p, ed.pen_slot);
+            }
+            if pressed(none, K::E) {
+                ed.tool = Tool::Eraser;
+            }
+            if pressed(none, K::L) {
+                ed.tool = Tool::Lasso;
+            }
+            if pressed(none, K::R) {
+                ed.ruler = if ed.ruler.is_some() { None } else { Some(crate::canvas::Ruler { center: ed.view_center(), angle: 0.0, kind: crate::canvas::RulerKind::Ruler }) };
+            }
+            if pressed(none, K::G) {
+                grid = true;
+            }
+            if pressed(Modifiers::SHIFT, K::S) {
+                smart = true;
+            }
+            let digits = [K::Num1, K::Num2, K::Num3, K::Num4, K::Num5, K::Num6, K::Num7, K::Num8, K::Num9];
+            for (i, k) in digits.iter().enumerate() {
+                if pressed(none, *k) {
+                    if let Some(p) = pens.get(i) {
+                        ed.set_pen(p, Some(i));
+                    }
+                }
+            }
+            if pressed(none, K::OpenBracket) {
+                if ed.tool == Tool::Eraser {
+                    ed.eraser_radius = (ed.eraser_radius / 1.25).max(1.0);
+                } else {
+                    ed.pen.width = (ed.pen.width / 1.2).max(0.5);
+                }
+            }
+            if pressed(none, K::CloseBracket) {
+                if ed.tool == Tool::Eraser {
+                    ed.eraser_radius = (ed.eraser_radius * 1.25).min(100.0);
+                } else {
+                    ed.pen.width = (ed.pen.width * 1.2).min(24.0 * crate::settings::MM);
+                }
+            }
+            if pressed(Modifiers::COMMAND, K::A) {
+                ed.select_all(page);
+            }
+            if pressed(Modifiers::COMMAND | Modifiers::SHIFT, K::G) {
+                ed.snapshot(page);
+                crate::selection::group(page, ed, false);
+                dirty = true;
+            } else if pressed(Modifiers::COMMAND, K::G) {
+                ed.snapshot(page);
+                crate::selection::group(page, ed, true);
+                dirty = true;
+            }
+            if pressed(Modifiers::COMMAND | Modifiers::ALT, K::R) {
+                let r = ed.last_rect;
+                ed.rotate_by(r, r.center(), std::f32::consts::FRAC_PI_2);
+            }
+            if let Some(st) = ed.status.take() {
+                self.status = (st, now_secs());
+            }
+        }
+        if smart {
+            self.settings.auto_shapes = !self.settings.auto_shapes;
+            self.set_status(if self.settings.auto_shapes { "Умные фигуры включены" } else { "Умные фигуры выключены" });
+            save = true;
+        }
+        if grid {
+            self.settings.snap_grid = !self.settings.snap_grid;
+            self.set_status(if self.settings.snap_grid { "Привязка к сетке включена" } else { "Привязка к сетке выключена" });
+            save = true;
+        }
+        if save {
+            self.settings.save();
+        }
+        if dirty {
+            self.mark_dirty(pid);
         }
     }
 
@@ -1614,7 +1871,7 @@ impl App {
                             w.on_top = !w.on_top;
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::WindowLevel(if w.on_top { egui::WindowLevel::AlwaysOnTop } else { egui::WindowLevel::Normal }));
                         }
-                        for (t, l) in [(Tool::Select, "Выбор"), (Tool::Pen, "Перо"), (Tool::Eraser(canvas::EraserMode::Stroke), "Ластик")] {
+                        for (t, l) in [(Tool::Select, "Выбор"), (Tool::Draw, "Перо"), (Tool::Eraser, "Ластик")] {
                             if ui.selectable_label(w.editor.tool == t, l).clicked() {
                                 w.editor.tool = t;
                             }
@@ -1650,14 +1907,6 @@ impl App {
         }
         pinned.retain(|w| w.open);
         self.pinned.extend(pinned);
-    }
-}
-
-impl Editor {
-    pub fn live_cancel(&mut self) {
-        self.editing = None;
-        self.crop = None;
-        self.format_painter = None;
     }
 }
 
