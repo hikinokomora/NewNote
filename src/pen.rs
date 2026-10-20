@@ -37,6 +37,7 @@ struct Shared {
     queue: Vec<PenSample>,
     pen_ids: HashSet<u32>,
     in_range: bool,
+    last_pressure: Option<f32>,
 }
 
 static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
@@ -54,6 +55,11 @@ pub fn drain() -> Vec<PenSample> {
 /// Is this egui touch id actually the pen?
 pub fn is_pen_id(id: u64) -> bool {
     shared().lock().unwrap().pen_ids.contains(&(id as u32))
+}
+
+/// Pressure of the pen while it touches the surface (for the settings test area).
+pub fn peek_last_pressure() -> Option<f32> {
+    shared().lock().unwrap().last_pressure
 }
 
 pub fn pen_in_range() -> bool {
@@ -112,6 +118,7 @@ unsafe fn handle_pointer(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, w
     sh.pen_ids.insert(pointer_id);
     if msg == WM_POINTERLEAVE {
         sh.in_range = false;
+        sh.last_pressure = None;
         sh.queue.push(PenSample {
             x: 0.0,
             y: 0.0,
@@ -178,6 +185,7 @@ unsafe fn handle_pointer(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, w
             0.6
         };
         sh.in_range = phase != PenPhase::Up || flags & POINTER_FLAG_INRANGE != 0;
+        sh.last_pressure = matches!(phase, PenPhase::Down | PenPhase::Move).then_some(pressure);
         sh.queue.push(PenSample {
             x,
             y,

@@ -214,6 +214,16 @@ pub fn append_transformed(dst: &mut Mesh, src: &Mesh, scale: f32, offset: Vec2) 
     dst.indices.extend(src.indices.iter().map(|i| i + base));
 }
 
+/// Dark ink is shown light on a dark page (the stored colour is unchanged).
+pub fn display_color(c: [u8; 4], dark: bool) -> [u8; 4] {
+    let lum = 0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32;
+    if dark && lum < 70.0 {
+        [235 - c[0] / 4, 235 - c[1] / 4, 235 - c[2] / 4, c[3]]
+    } else {
+        c
+    }
+}
+
 /// Mesh cache keyed by the stroke point buffer, so unchanged strokes are
 /// tessellated once and only transformed on pan/zoom.
 #[derive(Default)]
@@ -230,16 +240,17 @@ impl MeshCache {
             self.map.retain(|_, v| f - v.2 < 600);
         }
     }
-    pub fn get(&mut self, s: &Stroke, curve: f32) -> (Arc<Mesh>, Rect) {
+    pub fn get(&mut self, s: &Stroke, curve: f32, dark: bool) -> (Arc<Mesh>, Rect) {
+        let color = display_color(s.color, dark);
         let key = (
             Arc::as_ptr(&s.points) as usize,
-            s.color,
+            color,
             s.width.to_bits() ^ (s.closed as u32) ^ ((s.fill.is_some() as u32) << 1),
             curve.to_bits(),
         );
         let frame = self.frame;
         let e = self.map.entry(key).or_insert_with(|| {
-            let m = tessellate(s, curve);
+            let m = tessellate(&Stroke { color, ..s.clone() }, curve);
             let r = s.bbox();
             (Arc::new(m), r, frame)
         });

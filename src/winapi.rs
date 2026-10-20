@@ -428,6 +428,15 @@ impl Speller {
 
     /// Non-blocking: unknown words are queued and reported on a later frame.
     pub fn is_bad(&self, word: &str) -> bool {
+        // Words in another script than the checker language, and CamelCase names, are not checked.
+        let latin = word.chars().all(|c| c.is_ascii());
+        let cyr_lang = {
+            let l = self.state.lock().unwrap();
+            l.lang.starts_with("ru") || l.lang.starts_with("uk") || l.lang.starts_with("be")
+        };
+        if latin == cyr_lang || word.chars().skip(1).any(|c| c.is_uppercase()) {
+            return false;
+        }
         let mut s = self.state.lock().unwrap();
         if s.user.contains(&word.to_lowercase()) {
             return false;
