@@ -55,7 +55,7 @@ pub fn draw(app: &mut App, ui: &mut Ui) {
     }
 }
 
-fn search_panel(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
+pub fn search_panel(app: &mut App, ui: &mut Ui, ctx: &egui::Context) {
     let r = ui.add(egui::TextEdit::singleline(&mut app.search_q).hint_text("Искать во всех заметках…").desired_width(f32::INFINITY));
     if app.search_focus {
         r.request_focus();

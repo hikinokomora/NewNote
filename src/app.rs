@@ -33,6 +33,14 @@ pub enum Ribbon {
     Insert,
     Draw,
     View,
+    Help,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RailMode {
+    Notebooks,
+    Search,
+    Recent,
 }
 
 pub enum Dialog {
@@ -210,6 +218,11 @@ pub struct App {
     pub pen_settings: Option<usize>,
     pub pen_pick_slot: Option<usize>,
     pub underlay_next: bool,
+    pub ribbon_collapsed: bool,
+    pub rail: RailMode,
+    pub nav_hidden: bool,
+    pub recent: Vec<Id>,
+    pub page_filter: String,
 }
 
 impl App {
@@ -290,9 +303,21 @@ impl App {
             pen_settings: None,
             pen_pick_slot: None,
             underlay_next: false,
+            ribbon_collapsed: false,
+            rail: RailMode::Notebooks,
+            nav_hidden: false,
+            recent: Vec::new(),
+            page_filter: String::new(),
             settings,
         };
         app.apply_theme(&ctx);
+        app.ribbon = match app.settings.last_ribbon {
+            1 => Ribbon::Insert,
+            2 => Ribbon::Draw,
+            3 => Ribbon::View,
+            4 => Ribbon::Help,
+            _ => Ribbon::Home,
+        };
         let paths = app.settings.open_notebooks.clone();
         for p in paths {
             if let Ok(nb) = Notebook::open(&p) {
@@ -342,6 +367,23 @@ impl App {
         });
         let scale = if self.settings.touch_mode { 1.25 } else { 1.0 } * self.settings.ui_scale;
         ctx.set_zoom_factor(scale);
+        // OneNote-like purple accent.
+        for (theme, mut v) in [(egui::Theme::Light, egui::Visuals::light()), (egui::Theme::Dark, egui::Visuals::dark())] {
+            let p = crate::chrome::pal(theme == egui::Theme::Dark);
+            v.selection.bg_fill = p.accent.gamma_multiply(if theme == egui::Theme::Dark { 0.55 } else { 0.35 });
+            v.selection.stroke = egui::Stroke::new(1.0, p.accent);
+            v.hyperlink_color = p.accent;
+            v.panel_fill = p.nav_bg;
+            v.window_fill = if theme == egui::Theme::Dark { egui::Color32::from_rgb(43, 43, 43) } else { egui::Color32::WHITE };
+            v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, p.accent.gamma_multiply(0.7));
+            v.widgets.active.bg_fill = p.accent.gamma_multiply(0.6);
+            v.widgets.inactive.corner_radius = egui::CornerRadius::same(4);
+            v.widgets.hovered.corner_radius = egui::CornerRadius::same(4);
+            v.widgets.active.corner_radius = egui::CornerRadius::same(4);
+            v.window_corner_radius = egui::CornerRadius::same(8);
+            v.menu_corner_radius = egui::CornerRadius::same(6);
+            ctx.set_visuals_of(theme, v);
+        }
         ctx.global_style_mut(|s| {
             if self.settings.touch_mode {
                 s.spacing.interact_size.y = 34.0;
@@ -397,6 +439,11 @@ impl App {
             }
         }
         self.cur_page = page;
+        if let Some(p) = page {
+            self.recent.retain(|x| *x != p);
+            self.recent.insert(0, p);
+            self.recent.truncate(30);
+        }
         self.locked_by = None;
         self.version_sel = None;
         self.version_page = None;

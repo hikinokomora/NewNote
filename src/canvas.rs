@@ -56,6 +56,8 @@ pub enum Tool {
     Marker,
     Redact,
     Eyedropper,
+    /// Insert or remove vertical space by dragging.
+    Space,
 }
 
 impl Tool {
@@ -114,6 +116,7 @@ enum LiveKind {
     Compass,
     Measure,
     Redact,
+    Space,
 }
 
 struct Live {
@@ -1102,6 +1105,7 @@ fn pointer_down(ed: &mut Editor, page: &mut Page, env: &mut Env, src: Src, tool:
                 Tool::Compass => LiveKind::Compass,
                 Tool::Measure => LiveKind::Measure,
                 Tool::Redact => LiveKind::Redact,
+                Tool::Space => LiveKind::Space,
                 _ => return false,
             };
             if matches!(kind, LiveKind::Ink) {
@@ -1236,6 +1240,12 @@ fn extend_live(ed: &mut Editor, page: &mut Page, env: &mut Env, cp: Pos2, pressu
                     trail.push((cp, t));
                 }
             }
+        }
+        LiveKind::Space => {
+            if live.points.len() > 1 {
+                live.points.pop();
+            }
+            live.points.push(InkPoint(cp.x, cp.y, 1.0));
         }
         LiveKind::Shape(_) | LiveKind::Rect | LiveKind::Redact => {
             if live.points.len() > 1 {
@@ -1418,6 +1428,27 @@ fn finish_live(ed: &mut Editor, page: &mut Page, env: &mut Env) -> bool {
             false
         }
         LiveKind::Laser | LiveKind::Measure => false,
+        LiveKind::Space => {
+            let y0 = live.points[0].1;
+            let dy = live.points.last().map(|p| p.1 - y0).unwrap_or(0.0);
+            if dy.abs() * zoom < 3.0 {
+                return false;
+            }
+            ed.snapshot(page);
+            let x = Xform { offset: vec2(0.0, dy), ..Default::default() };
+            for s in page.strokes.iter_mut() {
+                if !s.locked && s.bbox().center().y >= y0 {
+                    *s = x.apply_stroke(s);
+                }
+            }
+            for it in page.items.iter_mut() {
+                if !it.locked && !it.underlay && it.pos[1] >= y0 {
+                    it.pos[1] += dy;
+                }
+            }
+            update_connectors(page);
+            true
+        }
         LiveKind::Lasso => {
             let poly: Vec<Pos2> = live.points.iter().map(|p| p.pos()).collect();
             if !live.add {
@@ -1936,6 +1967,19 @@ fn draw_live(painter: &egui::Painter, ed: &Editor, view: &Affine, curve: f32, da
         LiveKind::Lasso => {
             let pts: Vec<Pos2> = live.points.iter().map(|p| view.apply(p.pos())).collect();
             painter.add(Shape::dashed_line(&pts, EStroke::new(1.5, blue), 6.0, 4.0));
+        }
+        LiveKind::Space => {
+            let y0 = live.points[0].1;
+            let y1 = live.points.last().unwrap().1;
+            let vis = ed.visible(ed.last_rect);
+            let quad = |a: f32, b: f32| -> Vec<Pos2> { [pos2(vis.min.x, a), pos2(vis.max.x, a), pos2(vis.max.x, b), pos2(vis.min.x, b)].iter().map(|p| view.apply(*p)).collect() };
+            painter.add(Shape::convex_polygon(quad(y0.min(y1), y0.max(y1)), Color32::from_rgba_unmultiplied(60, 130, 255, 30), EStroke::NONE));
+            for y in [y0, y1] {
+                let (a, b) = (view.apply(pos2(vis.min.x, y)), view.apply(pos2(vis.max.x, y)));
+                painter.add(Shape::dashed_line(&[a, b], EStroke::new(1.2, blue), 6.0, 4.0));
+            }
+            let x = live.points[0].0;
+            painter.arrow(view.apply(pos2(x, y0)), view.apply(pos2(x, y1)) - view.apply(pos2(x, y0)), EStroke::new(1.5, blue));
         }
         LiveKind::Rect | LiveKind::Redact => {
             let a = live.points[0].pos();

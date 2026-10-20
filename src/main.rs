@@ -4,10 +4,12 @@ mod app;
 mod brush;
 mod calc;
 mod canvas;
+mod chrome;
 mod crypto;
 mod export;
 mod fonts;
 mod helper;
+mod icons;
 mod ink;
 mod items;
 mod model;
@@ -57,12 +59,15 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let icon = make_icon();
+    let native_frame = settings::Settings::load().native_frame;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("NewNote")
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([640.0, 420.0])
             .with_drag_and_drop(true)
+            .with_decorations(native_frame)
+            .with_transparent(false)
             .with_icon(icon),
         multisampling: 4,
         ..Default::default()

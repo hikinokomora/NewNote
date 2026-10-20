@@ -13,38 +13,28 @@ fn c32(c: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
 }
 
-fn tool_btn(ui: &mut Ui, on: bool, text: &str, tip: &str) -> bool {
-    ui.add(egui::Button::selectable(on, text)).on_hover_text(tip).clicked()
-}
-
-/// Small pen icon: brush glyph in its colour on a chip.
-fn pen_chip(ui: &mut Ui, p: &PenPreset, active: bool) -> egui::Response {
-    let size = vec2(30.0, 30.0);
-    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
-    let vis = ui.visuals();
-    let bg = if active { vis.selection.bg_fill } else if resp.hovered() { vis.widgets.hovered.bg_fill } else { vis.widgets.inactive.weak_bg_fill };
-    ui.painter().rect_filled(rect, 6.0, bg);
-    let c = c32([p.color[0], p.color[1], p.color[2], 255]);
-    let kind = p.brush();
-    // Stroke sample.
-    let w = (p.width * 0.6).clamp(1.5, 9.0);
-    let a = rect.left_bottom() + vec2(6.0, -8.0);
-    let b = rect.right_top() + vec2(-6.0, 8.0);
-    let col = if kind == InkKind::Highlighter { c.gamma_multiply(0.6) } else { c };
-    ui.painter().line_segment([a, b], egui::Stroke::new(w, col));
-    ui.painter().text(rect.left_top() + vec2(2.0, 1.0), egui::Align2::LEFT_TOP, kind.icon(), egui::FontId::proportional(10.0), vis.text_color());
+/// One pen of the gallery, drawn like a real pen (selected pen is raised).
+fn pen_slot(ui: &mut Ui, p: &PenPreset, active: bool) -> egui::Response {
+    let pal = crate::chrome::cur(ui);
+    let (rect, resp) = ui.allocate_exact_size(vec2(30.0, 40.0), egui::Sense::click());
     if active {
-        ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(1.5, vis.selection.stroke.color), egui::StrokeKind::Inside);
+        ui.painter().rect_filled(rect, 4.0, pal.sel);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, pal.hover);
     }
+    crate::icons::pen(ui.painter(), rect, p.brush(), p.color, p.effect, active, ui.visuals().dark_mode);
     resp
 }
 
 pub fn draw_ribbon(app: &mut App, ui: &mut Ui) {
+    use crate::chrome::{flat, group};
+    use crate::icons::Icon;
     let ctx = ui.ctx().clone();
     let Some(pid) = app.cur_page else {
         ui.label("Откройте страницу");
         return;
     };
+    let full = app.settings.ribbon_full;
     let mut save = false;
     let mut actions: Vec<crate::canvas::Action> = Vec::new();
     let mut open_settings: Option<usize> = None;
@@ -54,145 +44,123 @@ pub fn draw_ribbon(app: &mut App, ui: &mut Ui) {
         let (Some(ed), Some(page)) = (editors.get_mut(&pid), pages.get_mut(&pid)) else { return };
 
         // ---- Tools ----
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                if tool_btn(ui, ed.tool == Tool::Select, "⬉", "Выбор и ввод текста (Alt+1)") {
-                    ed.tool = Tool::Select;
-                }
-                if tool_btn(ui, ed.tool == Tool::Text, "T", "Текст: щелчок создаёт блок") {
-                    ed.tool = Tool::Text;
-                }
-                if tool_btn(ui, ed.tool == Tool::Lasso, "◌", "Лассо (L, кнопка пера)") {
-                    ed.tool = Tool::Lasso;
-                }
-                if tool_btn(ui, ed.tool == Tool::RectSelect, "⬚", "Выделение рамкой (Shift — добавить)") {
-                    ed.tool = Tool::RectSelect;
-                }
-                if tool_btn(ui, ed.tool == Tool::Pan, "✋", "Прокрутка") {
-                    ed.tool = Tool::Pan;
-                }
-            });
-            ui.horizontal(|ui| {
-                let er = ui.add(egui::Button::selectable(ed.tool == Tool::Eraser, "⌫")).on_hover_text("Ластик (E, обратный конец пера)");
-                if er.clicked() {
-                    ed.tool = Tool::Eraser;
-                }
-                ui.menu_button(ed.eraser_mode.label(), |ui| {
-                    for m in EraserMode::ALL {
-                        if ui.radio(ed.eraser_mode == m, m.label()).clicked() {
-                            ed.eraser_mode = m;
-                            ed.tool = Tool::Eraser;
-                        }
+        group(ui, full, "Инструменты", |ui| {
+            if flat(ui, Some(Icon::Select), "", "Выбор и ввод текста (Alt+1)", ed.tool == Tool::Select).clicked() {
+                ed.tool = Tool::Select;
+            }
+            if flat(ui, Some(Icon::Lasso), "", "Лассо (L, боковая кнопка пера)", ed.tool == Tool::Lasso).clicked() {
+                ed.tool = Tool::Lasso;
+            }
+            if flat(ui, Some(Icon::Space), "", "Вставить пробел: потяните вниз, чтобы раздвинуть содержимое", ed.tool == Tool::Space).clicked() {
+                ed.tool = Tool::Space;
+            }
+            let er = flat(ui, Some(Icon::Eraser), "", "Ластик (E, обратный конец пера); правый щелчок — режимы", ed.tool == Tool::Eraser);
+            if er.clicked() {
+                ed.tool = Tool::Eraser;
+            }
+            er.context_menu(|ui| {
+                ui.label(RichText::new("Ластик").strong());
+                for m in EraserMode::ALL {
+                    if ui.radio(ed.eraser_mode == m, m.label()).clicked() {
+                        ed.eraser_mode = m;
+                        ed.tool = Tool::Eraser;
                     }
-                    ui.add(egui::Slider::new(&mut ed.eraser_radius, 1.0..=100.0).text("Размер, px"));
-                    ui.separator();
-                    if ui.button("Очистить всю рукопись…").clicked() {
-                        clear_ink = true;
-                        ui.close();
-                    }
-                });
-                if tool_btn(ui, ed.tool == Tool::Laser, "🔴", "Указка: исчезающие штрихи") {
-                    ed.tool = Tool::Laser;
+                }
+                ui.add(egui::Slider::new(&mut ed.eraser_radius, 1.0..=100.0).text("Размер, px"));
+                ui.separator();
+                if ui.button("Очистить всю рукопись…").clicked() {
+                    clear_ink = true;
+                    ui.close();
                 }
             });
         });
-        ui.separator();
 
-        // ---- Pen gallery ----
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                let set_names: Vec<String> = settings.pen_sets.iter().map(|s| s.name.clone()).collect();
-                egui::ComboBox::from_id_salt("penset").width(90.0).selected_text(set_names.get(settings.active_set).cloned().unwrap_or_default()).show_ui(ui, |ui| {
-                    for (i, n) in set_names.iter().enumerate() {
-                        if ui.selectable_label(settings.active_set == i, n).clicked() {
-                            settings.active_set = i;
-                            save = true;
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Сохранить как новый набор").clicked() {
-                        let pens = settings.pens().to_vec();
-                        let n = settings.pen_sets.len() + 1;
-                        settings.pen_sets.push(crate::settings::PenSet { name: format!("Набор {n}"), pens });
-                        settings.active_set = settings.pen_sets.len() - 1;
-                        save = true;
-                    }
-                    if ui.button("Вернуть стандартные наборы").clicked() {
-                        settings.pen_sets = crate::settings::builtin_pen_sets();
-                        settings.active_set = 0;
-                        save = true;
-                    }
-                });
-                ui.label(RichText::new(format!("{} · {:.2} мм", ed.pen.name, ed.pen.width / MM)).small().weak());
-            });
-            ui.horizontal(|ui| {
-                let pens = settings.pens().to_vec();
-                let mut action: Option<(usize, &str)> = None;
-                for (i, p) in pens.iter().enumerate() {
-                    let active = ed.tool == Tool::Draw && ed.pen_slot == Some(i);
-                    let r = pen_chip(ui, p, active).on_hover_text(format!("{} ({}) — {}", p.name, p.brush().label(), if i < 9 { format!("клавиша {}", i + 1) } else { String::new() }));
-                    if r.clicked() {
-                        if active {
-                            open_settings = Some(i);
-                        } else {
-                            ed.set_pen(p, Some(i));
-                        }
-                    }
-                    if r.double_clicked() {
+        // ---- Pens ----
+        group(ui, full, "Перья", |ui| {
+            let pens = settings.pens().to_vec();
+            let mut action: Option<(usize, &str)> = None;
+            for (i, p) in pens.iter().enumerate() {
+                let active = ed.tool == Tool::Draw && ed.pen_slot == Some(i);
+                let r = pen_slot(ui, p, active).on_hover_text(format!("{} — {}, {:.2} мм{}", p.name, p.brush().label(), p.width / MM, if i < 9 { format!(" · клавиша {}", i + 1) } else { String::new() }));
+                if r.clicked() {
+                    if active {
                         open_settings = Some(i);
+                    } else {
+                        ed.set_pen(p, Some(i));
                     }
-                    r.context_menu(|ui| {
-                        for (label, op) in [("Изменить", "edit"), ("Дублировать", "dup"), ("Сбросить", "reset"), ("← Влево", "left"), ("Вправо →", "right"), ("Удалить", "del")] {
-                            if ui.button(label).clicked() {
-                                action = Some((i, op));
-                                ui.close();
-                            }
-                        }
-                    });
                 }
-                if ui.add(egui::Button::new("＋").min_size(vec2(30.0, 30.0))).on_hover_text("Добавить перо (копия текущего)").clicked() {
-                    let mut p = ed.pen.clone();
-                    p.name = format!("{} {}", p.brush().label(), settings.pens().len() + 1);
-                    settings.pens_mut().push(p);
-                    open_settings = Some(settings.pens().len() - 1);
+                r.context_menu(|ui| {
+                    for (label, op) in [("Изменить", "edit"), ("Дублировать", "dup"), ("Сбросить", "reset"), ("← Влево", "left"), ("Вправо →", "right"), ("Удалить", "del")] {
+                        if ui.button(label).clicked() {
+                            action = Some((i, op));
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if flat(ui, Some(Icon::Plus), "", "Добавить перо", false).clicked() {
+                let mut p = ed.pen.clone();
+                p.name = format!("{} {}", p.brush().label(), settings.pens().len() + 1);
+                settings.pens_mut().push(p);
+                open_settings = Some(settings.pens().len() - 1);
+                save = true;
+            }
+            let set_names: Vec<String> = settings.pen_sets.iter().map(|s| s.name.clone()).collect();
+            let sr = flat(ui, None, &format!("{} ⌄", set_names.get(settings.active_set).cloned().unwrap_or_default()), "Набор перьев", false);
+            egui::Popup::menu(&sr).show(|ui| {
+                for (i, n) in set_names.iter().enumerate() {
+                    if ui.selectable_label(settings.active_set == i, n).clicked() {
+                        settings.active_set = i;
+                        save = true;
+                    }
+                }
+                ui.separator();
+                if ui.button("Сохранить как новый набор").clicked() {
+                    let pens = settings.pens().to_vec();
+                    let n = settings.pen_sets.len() + 1;
+                    settings.pen_sets.push(crate::settings::PenSet { name: format!("Набор {n}"), pens });
+                    settings.active_set = settings.pen_sets.len() - 1;
                     save = true;
                 }
-                if let Some((i, op)) = action {
-                    let pens = settings.pens_mut();
-                    match op {
-                        "edit" => open_settings = Some(i),
-                        "dup" => {
-                            let mut p = pens[i].clone();
-                            p.name.push_str(" (копия)");
-                            pens.insert(i + 1, p);
-                        }
-                        "reset" => {
-                            if let Some(d) = crate::settings::builtin_pen_sets().get(settings.active_set).and_then(|s| s.pens.get(i)).cloned() {
-                                settings.pens_mut()[i] = d;
-                            }
-                        }
-                        "left" if i > 0 => pens.swap(i, i - 1),
-                        "right" if i + 1 < pens.len() => pens.swap(i, i + 1),
-                        "del" if pens.len() > 1 => {
-                            pens.remove(i);
-                        }
-                        _ => {}
-                    }
+                if ui.button("Вернуть стандартные наборы").clicked() {
+                    settings.pen_sets = crate::settings::builtin_pen_sets();
+                    settings.active_set = 0;
                     save = true;
                 }
             });
+            if let Some((i, op)) = action {
+                let pens = settings.pens_mut();
+                match op {
+                    "edit" => open_settings = Some(i),
+                    "dup" => {
+                        let mut p = pens[i].clone();
+                        p.name.push_str(" (копия)");
+                        pens.insert(i + 1, p);
+                    }
+                    "reset" => {
+                        if let Some(d) = crate::settings::builtin_pen_sets().get(settings.active_set).and_then(|s| s.pens.get(i)).cloned() {
+                            settings.pens_mut()[i] = d;
+                        }
+                    }
+                    "left" if i > 0 => pens.swap(i, i - 1),
+                    "right" if i + 1 < pens.len() => pens.swap(i, i + 1),
+                    "del" if pens.len() > 1 => {
+                        pens.remove(i);
+                    }
+                    _ => {}
+                }
+                save = true;
+            }
         });
-        ui.separator();
 
-        // ---- Shapes ----
-        ui.vertical(|ui| {
-            let label = match ed.tool {
-                Tool::Shape(k) => k.label().to_string(),
-                _ => "◇ Фигуры".to_string(),
-            };
-            ui.menu_button(label, |ui| {
-                for (group, kinds) in ShapeKind::GROUPS {
-                    ui.label(RichText::new(group).small().strong());
+        // ---- Shapes and conversion ----
+        group(ui, full, "Фигуры и преобразование", |ui| {
+            let selected_shape = matches!(ed.tool, Tool::Shape(_));
+            let sr = flat(ui, Some(Icon::Shapes), "Фигуры", "Галерея фигур", selected_shape);
+            egui::Popup::menu(&sr).show(|ui| {
+                ui.set_min_width(330.0);
+                for (grp, kinds) in ShapeKind::GROUPS {
+                    ui.label(RichText::new(grp).small().strong());
                     ui.horizontal_wrapped(|ui| {
                         for k in kinds {
                             if ui.selectable_label(ed.tool == Tool::Shape(*k), k.label()).clicked() {
@@ -203,224 +171,132 @@ pub fn draw_ribbon(app: &mut App, ui: &mut Ui) {
                     });
                 }
                 ui.separator();
-                ui.label(RichText::new("Shift — пропорции и углы по 15°, ломаная — щелчками, двойной щелчок завершает").small().weak());
-            });
-            ui.horizontal(|ui| {
-                ui.menu_button("Стиль", |ui| shape_style_ui(ui, &mut ed.shape));
-                if ui.selectable_label(settings.auto_shapes, "✨ Умные").on_hover_text("Умные фигуры: нарисованные от руки линии, круги, прямоугольники и треугольники выравниваются (Shift+S)").clicked() {
-                    settings.auto_shapes = !settings.auto_shapes;
+                ui.collapsing("Стиль фигуры", |ui| shape_style_ui(ui, &mut ed.shape));
+                if ui.checkbox(&mut settings.auto_shapes, "Умное рисование (Shift+S)").changed() {
                     save = true;
                 }
+                ui.label(RichText::new("Shift — пропорции и углы по 15°; ломаная — щелчками, двойной щелчок завершает").small().weak());
             });
-        });
-        ui.separator();
-
-        // ---- Rulers & helpers ----
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                for (kind, text, tip) in [(RulerKind::Ruler, "📏", "Линейка (R): штрих прилипает к краю"), (RulerKind::Protractor, "◠", "Транспортир"), (RulerKind::SetSquare, "◺", "Угольник 90°/45°")] {
-                    let on = ed.ruler.is_some_and(|r| r.kind == kind);
-                    if tool_btn(ui, on, text, tip) {
-                        ed.ruler = if on { None } else { Some(Ruler { center: ed.view_center(), angle: 0.0, kind }) };
-                    }
+            if flat(ui, Some(Icon::ToShape), "Преобразовать в фигуру", "Выделенные (или все) штрихи в аккуратные фигуры", false).clicked() {
+                ed.snapshot(page);
+                if ed.selection.strokes.is_empty() {
+                    ed.select_all(page);
+                    ed.selection.items.clear();
                 }
-                if tool_btn(ui, ed.tool == Tool::Compass, "⊙", "Циркуль: от центра задайте радиус, Shift — рисовать дугу") {
-                    ed.tool = Tool::Compass;
-                }
-                if tool_btn(ui, ed.tool == Tool::Measure, "↔", "Измерить расстояние (мм, см, px)") {
-                    ed.tool = Tool::Measure;
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui.selectable_label(settings.snap_grid, "▦ Сетка").on_hover_text("Привязка к сетке фона (G)").clicked() {
-                    settings.snap_grid = !settings.snap_grid;
-                    save = true;
-                }
-                ui.menu_button("┆ Направляющие", |ui| {
-                    let c = ed.view_center();
-                    if ui.button("Добавить горизонтальную").clicked() {
-                        page.guides.push(Guide { vertical: false, at: c.y });
-                    }
-                    if ui.button("Добавить вертикальную").clicked() {
-                        page.guides.push(Guide { vertical: true, at: c.x });
-                    }
-                    if ui.button("Убрать все").clicked() {
-                        page.guides.clear();
-                    }
-                    ui.label(RichText::new("Перетаскивайте линии в режиме выбора, правый клик — удалить").small().weak());
-                });
-            });
-        });
-        ui.separator();
-
-        // ---- Annotation tools ----
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                if tool_btn(ui, ed.tool == Tool::Marker, "①", "Нумерованная метка") {
-                    ed.tool = Tool::Marker;
-                }
-                if tool_btn(ui, ed.tool == Tool::Fill, "🪣", "Заливка замкнутой фигуры цветом пера") {
-                    ed.tool = Tool::Fill;
-                }
-                if tool_btn(ui, ed.tool == Tool::Redact, "▮", "Скрыть область") {
-                    ed.tool = Tool::Redact;
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui.selectable_label(ed.annotate, "📎 Аннотация").on_hover_text("Штрихи, начатые на картинке или блоке, привязываются к нему и двигаются вместе").clicked() {
-                    ed.annotate = !ed.annotate;
-                }
-            });
-        });
-        ui.separator();
-
-        // ---- Convert ----
-        ui.vertical(|ui| {
-            if ui.button("Аа Рукопись → текст").clicked() {
+                crate::selection::to_shapes(page, ed);
+                actions.push(crate::canvas::Action::Dirty);
+            }
+            let has_ink = !page.strokes.is_empty();
+            if ui.add_enabled_ui(has_ink, |ui| flat(ui, Some(Icon::ToText), "Преобразовать в текст", "Распознать рукописный текст", false)).inner.clicked() {
                 actions.push(crate::canvas::Action::OcrInk);
             }
-            ui.horizontal(|ui| {
-                if ui.button("◇ → фигуры").on_hover_text("Выделенные штрихи в аккуратные фигуры").clicked() {
-                    ed.snapshot(page);
-                    if ed.selection.strokes.is_empty() {
-                        ed.select_all(page);
-                        ed.selection.items.clear();
+            if ui.add_enabled_ui(has_ink, |ui| flat(ui, Some(Icon::Math), "Математика", "Рукописная формула в набранную и её решение", false)).inner.clicked() {
+                actions.push(crate::canvas::Action::InkToMath);
+            }
+        });
+
+        // ---- Rulers ----
+        group(ui, full, "Линейка", |ui| {
+            let on = ed.ruler.is_some();
+            let rr = flat(ui, Some(Icon::Ruler), "Линейка ⌄", "Линейка (R), транспортир, угольник, циркуль, измерение", on);
+            egui::Popup::menu(&rr).show(|ui| {
+                for (kind, text) in [(RulerKind::Ruler, "📏 Линейка   R"), (RulerKind::Protractor, "◠ Транспортир"), (RulerKind::SetSquare, "◺ Угольник 90°/45°")] {
+                    let active = ed.ruler.is_some_and(|r| r.kind == kind);
+                    if ui.selectable_label(active, text).clicked() {
+                        ed.ruler = if active { None } else { Some(Ruler { center: ed.view_center(), angle: 0.0, kind }) };
                     }
-                    crate::selection::to_shapes(page, ed);
+                }
+                if ed.ruler.is_some() && ui.button("Убрать линейку").clicked() {
+                    ed.ruler = None;
+                }
+                ui.separator();
+                if ui.selectable_label(ed.tool == Tool::Compass, "⊙ Циркуль").on_hover_text("От центра задайте радиус, Shift — рисовать дугу").clicked() {
+                    ed.tool = Tool::Compass;
+                }
+                if ui.selectable_label(ed.tool == Tool::Measure, "↔ Измерить расстояние").clicked() {
+                    ed.tool = Tool::Measure;
+                }
+                ui.separator();
+                if ui.checkbox(&mut settings.snap_grid, "Привязка к сетке   G").changed() {
+                    save = true;
+                }
+                let c = ed.view_center();
+                if ui.button("Добавить горизонтальную направляющую").clicked() {
+                    page.guides.push(Guide { vertical: false, at: c.y });
                     actions.push(crate::canvas::Action::Dirty);
                 }
-                if ui.button("∑ → формула").clicked() {
-                    actions.push(crate::canvas::Action::InkToMath);
+                if ui.button("Добавить вертикальную направляющую").clicked() {
+                    page.guides.push(Guide { vertical: true, at: c.x });
+                    actions.push(crate::canvas::Action::Dirty);
+                }
+                if !page.guides.is_empty() && ui.button("Убрать направляющие").clicked() {
+                    page.guides.clear();
+                    actions.push(crate::canvas::Action::Dirty);
                 }
             });
         });
-        ui.separator();
 
-        // ---- Page and layers ----
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.menu_button("Фон", |ui| {
-                    let cur = page.pattern();
-                    for p in Pattern::ALL {
-                        if ui.radio(cur == p, p.label()).clicked() {
-                            page.pattern = Some(p);
-                            page.pattern_step = 0.0;
-                            actions.push(crate::canvas::Action::Dirty);
-                        }
-                    }
-                    ui.separator();
-                    let mut step = if page.pattern_step > 0.0 { page.pattern_step } else { cur.default_step() };
-                    if ui.add(egui::Slider::new(&mut step, 2.0..=80.0).text("Размер ячейки")).changed() {
-                        page.pattern_step = step;
-                        actions.push(crate::canvas::Action::Dirty);
-                    }
-                    ui.horizontal(|ui| {
-                        ui.label("Цвет линий:");
-                        let mut c = page.line_color.map(c32).unwrap_or(Color32::from_rgba_unmultiplied(80, 130, 210, 55));
-                        if ui.color_edit_button_srgba(&mut c).changed() {
-                            page.line_color = Some(c.to_srgba_unmultiplied());
-                            actions.push(crate::canvas::Action::Dirty);
-                        }
-                        if ui.small_button("Сброс").clicked() {
-                            page.line_color = None;
-                            actions.push(crate::canvas::Action::Dirty);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Цвет страницы:");
-                        let mut c = page.bg_color.map(c32).unwrap_or(Color32::WHITE);
-                        if ui.color_edit_button_srgba(&mut c).changed() {
-                            page.bg_color = Some(c.to_srgba_unmultiplied());
-                            actions.push(crate::canvas::Action::Dirty);
-                        }
-                        if ui.small_button("Сброс").clicked() {
-                            page.bg_color = None;
-                            actions.push(crate::canvas::Action::Dirty);
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Размер:");
-                        for s in PageSize::ALL {
-                            if ui.selectable_label(page.size == s, s.label()).clicked() {
-                                page.size = s;
-                                actions.push(crate::canvas::Action::Dirty);
-                            }
-                        }
-                    });
-                    ui.separator();
-                    if ui.button("Подложка: изображение или PDF…").clicked() {
-                        actions.push(crate::canvas::Action::Status("underlay".into()));
+        // ---- Page ----
+        group(ui, full, "Страница", |ui| {
+            let br = flat(ui, Some(Icon::Page), "Фон ⌄", "Фон, цвет и размер страницы, подложка", false);
+            egui::Popup::menu(&br).show(|ui| background_menu(ui, page, ed, &mut actions));
+            let lr = flat(ui, Some(Icon::Layers), &format!("{} ⌄", LAYER_NAMES[ed.layer as usize]), "Слои", false);
+            egui::Popup::menu(&lr).show(|ui| layers_menu(ui, page, ed, &mut actions));
+        });
+
+        // ---- More ----
+        group(ui, full, "Ещё", |ui| {
+            if flat(ui, Some(Icon::Laser), "", "Указка: исчезающие штрихи", ed.tool == Tool::Laser).clicked() {
+                ed.tool = Tool::Laser;
+            }
+            let mr = flat(ui, None, "Ещё ⌄", "Другие инструменты и вид", false);
+            egui::Popup::menu(&mr).show(|ui| {
+                ui.set_min_width(260.0);
+                for (t, l) in [
+                    (Tool::Text, "T  Текст: щелчок создаёт блок"),
+                    (Tool::RectSelect, "⬚  Выделение рамкой"),
+                    (Tool::Pan, "✋  Прокрутка"),
+                    (Tool::Marker, "①  Нумерованная метка"),
+                    (Tool::Fill, "🪣  Заливка фигуры"),
+                    (Tool::Redact, "▮  Скрыть область"),
+                    (Tool::Eyedropper, "💧  Пипетка"),
+                ] {
+                    if ui.selectable_label(ed.tool == t, l).clicked() {
+                        ed.tool = t;
                         ui.close();
                     }
-                    if ui.checkbox(&mut ed.edit_underlay, "Редактировать подложку").changed() {}
+                }
+                ui.separator();
+                ui.checkbox(&mut ed.annotate, "Аннотации: штрихи привязываются к картинкам и блокам");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("⟳ 90°").on_hover_text("Ctrl+Alt+R").clicked() {
+                        let r = ed.last_rect;
+                        ed.rotate_by(r, r.center(), std::f32::consts::FRAC_PI_2);
+                    }
+                    if ui.selectable_label(ed.free_rotate, "↻ Двумя пальцами").clicked() {
+                        ed.free_rotate = !ed.free_rotate;
+                    }
+                    if ui.selectable_label(ed.mirror, "⇋ Зеркало").clicked() {
+                        ed.toggle_mirror();
+                    }
+                    if ed.rotated() && ui.button("Сброс").clicked() {
+                        ed.reset_rotation();
+                    }
                 });
-                ui.menu_button(format!("☰ Слой: {}", LAYER_NAMES[ed.layer as usize]), |ui| {
-                    for i in (0..3).rev() {
-                        ui.horizontal(|ui| {
-                            if ui.radio(ed.layer == i as u8, LAYER_NAMES[i]).on_hover_text("Рисовать в этом слое").clicked() {
-                                ed.layer = i as u8;
-                            }
-                            let l = &mut page.layers[i];
-                            if ui.selectable_label(l.visible, "👁").on_hover_text("Показать / скрыть").clicked() {
-                                l.visible = !l.visible;
-                                actions.push(crate::canvas::Action::Dirty);
-                            }
-                            if ui.selectable_label(l.locked, "🔒").on_hover_text("Заблокировать").clicked() {
-                                l.locked = !l.locked;
-                                actions.push(crate::canvas::Action::Dirty);
-                            }
-                            if ui.add(egui::Slider::new(&mut l.opacity, 0.05..=1.0).show_value(false)).on_hover_text("Прозрачность слоя").changed() {
-                                actions.push(crate::canvas::Action::Dirty);
-                            }
-                        });
-                    }
-                    ui.separator();
-                    if ui.button("Объединить все слои в «Рисунок»").clicked() {
-                        ed.snapshot(page);
-                        for s in page.strokes.iter_mut() {
-                            s.layer = 1;
-                        }
-                        actions.push(crate::canvas::Action::Dirty);
-                    }
-                    if ui.button("Разблокировать все объекты").clicked() {
-                        crate::selection::unlock_all(page);
-                        actions.push(crate::canvas::Action::Dirty);
-                    }
-                    ui.label(RichText::new("Маркер «под текстом» рисует в слое «Фон»").small().weak());
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Рисует:");
+                    save |= ui.toggle_value(&mut settings.pen_draws, "✒ перо").changed();
+                    save |= ui.toggle_value(&mut settings.touch_draws, "☝ палец").changed();
+                    save |= ui.toggle_value(&mut settings.mouse_draws, "🖱 мышь").changed();
                 });
-            });
-            ui.horizontal(|ui| {
-                if ui.button("⟳ 90°").on_hover_text("Повернуть холст (Ctrl+Alt+R)").clicked() {
-                    let r = ed.last_rect;
-                    ed.rotate_by(r, r.center(), std::f32::consts::FRAC_PI_2);
-                }
-                if ui.selectable_label(ed.free_rotate, "↻ Свободно").on_hover_text("Поворот двумя пальцами").clicked() {
-                    ed.free_rotate = !ed.free_rotate;
-                }
-                if ui.selectable_label(ed.mirror, "⇋").on_hover_text("Зеркало").clicked() {
-                    ed.toggle_mirror();
-                }
-                if ed.rotated() && ui.small_button("Сброс").clicked() {
-                    ed.reset_rotation();
-                }
-            });
-        });
-        ui.separator();
-
-        // ---- Input & playback ----
-        ui.vertical(|ui| {
-            ui.horizontal(|ui| {
-                ui.label("Рисует:");
-                save |= ui.toggle_value(&mut settings.pen_draws, "✒").on_hover_text("Перо").changed();
-                save |= ui.toggle_value(&mut settings.touch_draws, "☝").on_hover_text("Палец").changed();
-                save |= ui.toggle_value(&mut settings.mouse_draws, "🖱").on_hover_text("Мышь").changed();
-            });
-            ui.horizontal(|ui| {
-                if ui.button("▶ Запись").on_hover_text("Воспроизвести рисунок в порядке рисования").clicked() {
+                ui.separator();
+                if ui.button("▶ Воспроизвести рисование").clicked() {
                     ed.replay = Some(crate::canvas::Replay { start: ctx.input(|i| i.time), speed: 1.0, paused: None });
+                    ui.close();
                 }
-                if ui.selectable_label(settings.minimap, "🗺").on_hover_text("Мини-карта").clicked() {
-                    settings.minimap = !settings.minimap;
+                if ui.checkbox(&mut settings.minimap, "Мини-карта").changed() {
                     save = true;
                 }
             });
@@ -438,6 +314,98 @@ pub fn draw_ribbon(app: &mut App, ui: &mut Ui) {
     for a in actions {
         app.handle_action(&ctx, a);
     }
+}
+
+fn background_menu(ui: &mut Ui, page: &mut Page, ed: &mut crate::canvas::Editor, actions: &mut Vec<crate::canvas::Action>) {
+    let cur = page.pattern();
+    ui.set_min_width(240.0);
+    for p in Pattern::ALL {
+        if ui.radio(cur == p, p.label()).clicked() {
+            page.pattern = Some(p);
+            page.pattern_step = 0.0;
+            actions.push(crate::canvas::Action::Dirty);
+        }
+    }
+    ui.separator();
+    let mut step = if page.pattern_step > 0.0 { page.pattern_step } else { cur.default_step() };
+    if ui.add(egui::Slider::new(&mut step, 2.0..=80.0).text("Размер ячейки")).changed() {
+        page.pattern_step = step;
+        actions.push(crate::canvas::Action::Dirty);
+    }
+    ui.horizontal(|ui| {
+        ui.label("Цвет линий:");
+        let mut c = page.line_color.map(c32).unwrap_or(Color32::from_rgba_unmultiplied(80, 130, 210, 55));
+        if ui.color_edit_button_srgba(&mut c).changed() {
+            page.line_color = Some(c.to_srgba_unmultiplied());
+            actions.push(crate::canvas::Action::Dirty);
+        }
+        if ui.small_button("Сброс").clicked() {
+            page.line_color = None;
+            actions.push(crate::canvas::Action::Dirty);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Цвет страницы:");
+        let mut c = page.bg_color.map(c32).unwrap_or(Color32::WHITE);
+        if ui.color_edit_button_srgba(&mut c).changed() {
+            page.bg_color = Some(c.to_srgba_unmultiplied());
+            actions.push(crate::canvas::Action::Dirty);
+        }
+        if ui.small_button("Сброс").clicked() {
+            page.bg_color = None;
+            actions.push(crate::canvas::Action::Dirty);
+        }
+    });
+    ui.label("Размер:");
+    ui.horizontal_wrapped(|ui| {
+        for s in PageSize::ALL {
+            if ui.selectable_label(page.size == s, s.label()).clicked() {
+                page.size = s;
+                actions.push(crate::canvas::Action::Dirty);
+            }
+        }
+    });
+    ui.separator();
+    if ui.button("Подложка: изображение или PDF…").clicked() {
+        actions.push(crate::canvas::Action::Status("underlay".into()));
+        ui.close();
+    }
+    ui.checkbox(&mut ed.edit_underlay, "Редактировать подложку");
+}
+
+fn layers_menu(ui: &mut Ui, page: &mut Page, ed: &mut crate::canvas::Editor, actions: &mut Vec<crate::canvas::Action>) {
+    for i in (0..3).rev() {
+        ui.horizontal(|ui| {
+            if ui.radio(ed.layer == i as u8, LAYER_NAMES[i]).on_hover_text("Рисовать в этом слое").clicked() {
+                ed.layer = i as u8;
+            }
+            let l = &mut page.layers[i];
+            if ui.selectable_label(l.visible, "👁").on_hover_text("Показать / скрыть").clicked() {
+                l.visible = !l.visible;
+                actions.push(crate::canvas::Action::Dirty);
+            }
+            if ui.selectable_label(l.locked, "🔒").on_hover_text("Заблокировать").clicked() {
+                l.locked = !l.locked;
+                actions.push(crate::canvas::Action::Dirty);
+            }
+            if ui.add(egui::Slider::new(&mut l.opacity, 0.05..=1.0).show_value(false)).on_hover_text("Прозрачность слоя").changed() {
+                actions.push(crate::canvas::Action::Dirty);
+            }
+        });
+    }
+    ui.separator();
+    if ui.button("Объединить все слои в «Рисунок»").clicked() {
+        ed.snapshot(page);
+        for s in page.strokes.iter_mut() {
+            s.layer = 1;
+        }
+        actions.push(crate::canvas::Action::Dirty);
+    }
+    if ui.button("Разблокировать все объекты").clicked() {
+        crate::selection::unlock_all(page);
+        actions.push(crate::canvas::Action::Dirty);
+    }
+    ui.label(RichText::new("Маркер «под текстом» рисует в слое «Фон»").small().weak());
 }
 
 pub fn shape_style_ui(ui: &mut Ui, st: &mut crate::canvas::ShapeStyle) {
