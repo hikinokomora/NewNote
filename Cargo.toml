@@ -1,0 +1,66 @@
+[package]
+name = "newnote"
+version = "0.1.0"
+edition = "2024"
+description = "Local-first notebook with free canvas, ink and pen tablet support"
+license = "MIT"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "clipboard", "links"] }
+egui = "0.37"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+rfd = "0.15"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "gif", "webp"] }
+aes-gcm = "0.10"
+argon2 = "0.5"
+rand = "0.8"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+similar = "2"
+rust_xlsxwriter = { version = "0.90", default-features = false }
+calamine = { version = "0.31", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_Threading",
+    "Win32_Security",
+] }
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Data_Xml_Dom",
+    "Data_Pdf",
+    "Storage",
+    "UI_Notifications",
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_Media_Speech",
+    "Win32_Globalization",
+    "Win32_System_WinRT",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
