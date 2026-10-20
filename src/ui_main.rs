@@ -1104,7 +1104,8 @@ fn nav_tree(app: &mut App, ui: &mut Ui) {
     // Notebook picker.
     ui.horizontal(|ui| {
         let name = app.nb().map(|n| if n.sealed { format!("🔒 {}", n.meta.name) } else { n.meta.name.clone() }).unwrap_or_else(|| "Нет записной книжки".into());
-        let w = ui.available_width() - 34.0;
+        // Exactly the free width: anything wider makes the resizable panel grow every frame.
+        let w = (ui.available_width() - 28.0 - ui.spacing().item_spacing.x).max(40.0);
         let (r, resp) = ui.allocate_exact_size(vec2(w, 34.0), egui::Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(r, 4.0, p.hover);

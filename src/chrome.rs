@@ -391,8 +391,10 @@ pub fn resize_edges(ctx: &egui::Context) {
 pub fn ribbon(app: &mut App, ui: &mut Ui) {
     let p = cur(ui);
     let ctx = ui.ctx().clone();
-    // Tabs row.
-    ui.horizontal(|ui| {
+    // Tabs row. Fixed height: the right-to-left part would otherwise take the
+    // whole panel height and the top panel would grow on every repaint.
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), 32.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_height(32.0);
         ui.spacing_mut().item_spacing.x = 4.0;
         ui.add_space(6.0);
         let file = tab(ui, "Файл", false, p);
@@ -461,7 +463,7 @@ pub fn ribbon(app: &mut App, ui: &mut Ui) {
     if app.ribbon_collapsed {
         return;
     }
-    egui::ScrollArea::horizontal().id_salt("ribbon_scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+    egui::ScrollArea::horizontal().id_salt("ribbon_scroll").max_height(if app.settings.ribbon_full { 64.0 } else { 36.0 }).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
             ui.add_space(6.0);
