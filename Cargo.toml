@@ -1,6 +1,6 @@
 [package]
 name = "newnote"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Local-first notebook with free canvas, ink and pen tablet support"
 license = "MIT"
