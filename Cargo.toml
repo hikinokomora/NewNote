@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "clipboard", "links"] }
 egui = "0.37"
+raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
